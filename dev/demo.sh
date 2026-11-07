@@ -94,7 +94,9 @@ ls "$HERMES_HOME"/cron/output/*/*.md 2>/dev/null > "$SEEN" || true
 
 # --- 1. It listens and commits -----------------------------------------------------------------
 say "1. It listens and commits"
-chat "I want the hackathon PR open by Tuesday."
+# The stub always checks in after a minute; a real model picks a real time (Monday), so on the
+# 1-minute demo clock it is asked for one.
+chat "I want the hackathon PR open by Tuesday.${REAL:+ Check in with me in a minute.}"
 note "the agent filed it under the year goal and scheduled its own check-in:"
 hermes hyperactive status | sed -n '/^Goals/,/^$/p' | sed 's/^/    /'
 hermes cron list 2>&1 | grep -E "hyperactive-pulse|Schedule:|Mode:" | sed 's/^ */    /'
@@ -125,7 +127,7 @@ wait_phone 180 || true   # re-asked
 wait_phone 180 || true   # gym applied, domain held
 
 say "The user answers the money card with a plain reply"
-chat "${DEMO_ANSWER:-pay}"
+chat "${DEMO_ANSWER:-$([[ -n "$REAL" ]] && echo yes || echo pay)}"
 wait_phone 180 || true   # the reminder the 'pay' action scheduled
 
 say "/ha why: every message traces to a goal"
