@@ -149,7 +149,7 @@ def ensure_pulse(ctx) -> dict:
             results[spec["name"]] = {"job_id": job_id, "created": False, "updated": sorted(drift)}
             continue
         created = json.loads(ctx.dispatch_tool("cronjob_manage", {
-            "action": "create", "catch_up": True, **spec}) or "{}")
+            "action": "create", **spec}) or "{}")
         if not created.get("success", True) or created.get("error"):
             raise RuntimeError(f"could not create {spec['name']} job: {created}")
         results[spec["name"]] = {"job_id": created.get("job_id") or created.get("id"), "created": True}
@@ -205,8 +205,8 @@ def _ensure_jobs_cli(specs: list[dict]) -> dict:
                                      "updated": [e.lstrip("-") for e in edits[::2]]}
             continue
         args = ["cron", "create", spec["schedule"]] + ([spec["prompt"]] if spec.get("prompt") else [])
-        args += ["--name", spec["name"], "--script", spec["script"], "--deliver", spec["deliver"],
-                 "--catch-up", "on"]
+        # Missed runs follow the user's cron.catch_up_missed (on by default); older Hermes has no flag.
+        args += ["--name", spec["name"], "--script", spec["script"], "--deliver", spec["deliver"]]
         args += ["--no-agent"] if spec["no_agent"] else []
         for skill in spec.get("skills", []):
             args += ["--skill", skill]
