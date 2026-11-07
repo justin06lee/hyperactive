@@ -99,3 +99,22 @@ def test_targeted_reply_picks_one_of_several_cards(loaded):
     assert "answers card" not in ctx["context"]  # ambiguous: two cards wait, the model decides
     [ctx] = [r for r in manager.invoke_hook("pre_llm_call", user_message="card 2: skip", **hook) if r]
     assert "answers card 2" in ctx["context"]
+
+
+def test_job_specs_pulse_and_brief():
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("hyperactive_under_test", PLUGIN / "__init__.py",
+                                                  submodule_search_locations=[str(PLUGIN)])
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    cfg = {"every": "every 5 minutes", "deliver": "telegram", "brief_at": "07:30"}
+    pulse_job, brief_job = mod._job_specs(cfg)
+    assert pulse_job["no_agent"] is True and pulse_job["script"] == "hyperactive_pulse.py"
+    assert brief_job == {"name": "hyperactive-brief", "schedule": "30 7 * * *", "script": "hyperactive_brief.py",
+                         "no_agent": False, "prompt": mod.BRIEF_PROMPT, "skills": ["hyperactive:brief"],
+                         "deliver": "telegram"}
+    assert len(mod._job_specs({**cfg, "brief_at": ""})) == 1
+    with pytest.raises(ValueError):
+        mod._job_specs({**cfg, "brief_at": "7.30am"})
+    assert mod._schedule_key("every 5 minutes") == mod._schedule_key("every 5m")

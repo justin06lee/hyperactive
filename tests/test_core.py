@@ -241,3 +241,22 @@ def test_match_option():
     assert store.match_option(["yes", "no"], " Yes! ") == "yes"
     assert store.match_option(["pay", "skip"], "2") == "skip"
     assert store.match_option(["yes", "no"], "yes please move it") is None
+
+
+def test_brief_data_is_read_only_and_empty_when_idle(tmp_path, db):
+    assert pulse.brief(tmp_path) == ""  # nothing active: Hermes skips the model call
+    year = store.add_goal(db, "Win a hackathon prize", "year")
+    week = store.add_goal(db, "Open the catalog PR", "week", parent_id=year)
+    store.add_followup(db, week, "Is the PR open?", "in 1m")
+    store.add_card(db, "Pay the $40 domain renewal?", "pay", options=["pay", "skip"], stakes="money", goal_id=week)
+    (tmp_path / "pulse.json").write_text('{"card_timeout": "1m"}')
+    pulse.run(tmp_path, at=later(0))  # asks the card
+    events = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    out = pulse.brief(tmp_path, at=later(0.5))
+    assert "Waiting on the user (tap cards):\n- card 1: Pay the $40 domain renewal? (pay / skip; " \
+           "recommended pay, money stakes) [goal #2 Open the catalog PR]" in out
+    assert "Scheduled for today:\n- " in out and "followup: Is the PR open? [goal #2" in out
+    assert "Active week goals:\n- #2 Open the catalog PR (under Win a hackathon prize)" in out
+    assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events  # changed nothing
+    assert store.pending_followups(db)[0]["status"] == "pending"

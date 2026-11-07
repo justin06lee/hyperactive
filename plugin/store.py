@@ -289,8 +289,9 @@ def render_tree(conn, *, max_lines: int = 40) -> str:
     return "\n".join(lines[:max_lines] + (["  ..."] if len(lines) > max_lines else []))
 
 
-def stale_goals(conn, at: datetime, stale_after: timedelta) -> list[dict]:
-    """Week goals still for stale_after (quarter goals: 4x), not nudged since they last moved."""
+def stale_goals(conn, at: datetime, stale_after: timedelta, *, include_nudged: bool = False) -> list[dict]:
+    """Week goals still for stale_after (quarter goals: 4x), not nudged since they last moved
+    (include_nudged: those too, for the brief)."""
     out = []
     for g in conn.execute("SELECT * FROM goals WHERE status='active' AND horizon IN ('week','quarter') "
                           "AND NOT (title=? AND parent_id IS NULL) ORDER BY last_moved_at", (INBOX,)):
@@ -298,7 +299,8 @@ def stale_goals(conn, at: datetime, stale_after: timedelta) -> list[dict]:
         moved = parse_iso(g["last_moved_at"])
         if at - moved < limit:
             continue
-        if g["nudged_at"] and parse_iso(g["nudged_at"]) > moved and at - parse_iso(g["nudged_at"]) < limit:
+        if (not include_nudged and g["nudged_at"] and parse_iso(g["nudged_at"]) > moved
+                and at - parse_iso(g["nudged_at"]) < limit):
             continue  # already nudged for this stretch of stillness
         out.append(dict(g))
     return out

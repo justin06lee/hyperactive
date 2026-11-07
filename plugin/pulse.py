@@ -8,6 +8,8 @@ Every item it sends ends with the goal it serves, and is logged as a `pulse.*` e
 names the row that caused it, which is what `/ha why` reads back.
 
 Invoked through the shim the plugin installs at <HERMES_HOME>/scripts/hyperactive_pulse.py.
+`brief()` is the other entry point: the data for the daily brief, printed by a second shim as the
+pre-run script of an agent-mode cron job. It changes nothing; empty output skips the model call.
 """
 
 from __future__ import annotations
@@ -220,9 +222,58 @@ def explain(conn, event_id: int | None = None) -> str:
     return "\n\n".join(blocks)
 
 
+# --- the daily brief's data ------------------------------------------------------------------
+
+def brief(data_dir: Path, at: datetime | None = None) -> str:
+    """Facts for the daily brief, read-only. The agent-mode brief job gets this as its script
+    output and writes the prose (skill hyperactive:brief). Empty when nothing is active, which makes
+    Hermes skip the model call entirely."""
+    at = at or store.now()
+    cfg = load_settings(data_dir)
+    stale_after = store.parse_duration(cfg["stale_after"])
+    local = at.astimezone()
+    end_of_day = local.replace(hour=23, minute=59, second=59, microsecond=0)
+    conn = store.connect(data_dir / "hyperactive.db")
+    try:
+        def goal(gid) -> str:
+            chain = store.goal_chain(conn, gid)
+            return f"goal #{gid} {chain[0]['title']}" if chain else "inbox"
+
+        sections: list[tuple[str, list[str]]] = []
+        att = store.attention(conn, at)
+        sections.append(("Waiting on the user (tap cards)", [
+            f"- card {c['id']}: {c['question']} ({' / '.join(c['options'])}; recommended {c['recommended']}, "
+            f"{c['stakes']} stakes) [{goal(c['goal_id'])}]" for c in att["cards"]]))
+        sections.append(("Scheduled for today", [
+            f"- {store.local_time(f['due_at'], at=at)} {f['kind']}: {f['text']} [{goal(f['goal_id'])}]"
+            for f in store.pending_followups(conn) if store.parse_iso(f["due_at"]) <= end_of_day]))
+        sections.append(("Promises due within a day or overdue", [
+            f"- {store.commitment_text(c)}: "
+            f"{'overdue since' if store.parse_iso(c['due_at']) <= at else 'due'} "
+            f"{store.local_time(c['due_at'], at=at)} [{goal(c['goal_id'])}]" for c in att["commitments"]]))
+        sections.append(("Decisions up for review", [
+            f"- \"{d['title']}\": {d['choice']} [{goal(d['goal_id'])}]" for d in att["decisions"]]))
+        sections.append(("Stalled goals", [
+            f"- #{g['id']} {g['title']} ({g['horizon']}): no movement since "
+            f"{store.local_time(g['last_moved_at'], at=at)}"
+            for g in store.stale_goals(conn, at, stale_after, include_nudged=True)[:3]]))
+        week = conn.execute("SELECT * FROM goals WHERE status='active' AND horizon='week' "
+                            "ORDER BY last_moved_at DESC LIMIT 6").fetchall()
+        sections.append(("Active week goals", [
+            f"- #{g['id']} {g['title']}" + (f" (under {store.goal_chain(conn, g['id'])[1]['title']})"
+                                             if len(store.goal_chain(conn, g["id"])) > 1 else "")
+            for g in week]))
+        if not any(lines for _, lines in sections):
+            return ""
+        body = [f"{title}:\n" + "\n".join(lines) for title, lines in sections if lines]
+        return f"hyperactive data for {local.strftime('%A %b %-d, %H:%M')}\n\n" + "\n\n".join(body)
+    finally:
+        conn.close()
+
+
 def main(argv: list[str]) -> int:
     data_dir = Path(argv[1])
-    text = run(data_dir)
+    text = brief(data_dir) if argv[0] == "brief" else run(data_dir)
     if text:
         print(text)
     return 0
