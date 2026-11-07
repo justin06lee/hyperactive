@@ -1,9 +1,13 @@
 """A scripted stand-in for an LLM, so the scratch Hermes runs real agent turns with no API key.
 
 OpenAI-compatible /v1/chat/completions on 127.0.0.1. It is NOT a model: it pattern-matches.
-  - "goal: <title>" in the user turn -> calls ha_goal_add(title, week, follow up in 1m)
-  - after a tool result               -> a short text reply quoting the result
-  - anything else                     -> echoes whether the hyperactive system section is present
+  - "I want <goal> by <when>" or "goal: <title>" -> ha_goal_add(week goal, filed under the first
+    [year] goal in the system prompt's objective tree, check-in in 1m)
+  - lines "tool: <name> <json args>"            -> calls those tools (dev-only, for seeding demos
+                                                   through the real tool path)
+  - a [hyperactive] note saying a card was answered -> confirms it in one line
+  - after tool results                          -> a short reply built from the result
+  - anything else                               -> echoes whether the hyperactive section is present
 Usage: python dev/stub_llm.py [port]   (default 18766)
 """
 
@@ -20,25 +24,69 @@ def _text(content) -> str:
     return content or ""
 
 
+def _calls(calls: list, tools: list) -> dict:
+    """Tool calls, through Hermes Tool Search's tool_call bridge when plugin tools are deferred."""
+    direct = {t.get("function", {}).get("name") for t in tools}
+    if not all(name in direct for name, _ in calls):
+        calls = [("tool_call", {"calls": [{"name": n, "arguments": a} for n, a in calls]})]
+    stamp = int(time.time() * 1000)
+    return {"role": "assistant", "content": None, "tool_calls": [{
+        "id": f"call_{stamp}_{i}", "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)}} for i, (name, args) in enumerate(calls)]}
+
+
+def _reply_to_tool(messages: list) -> str:
+    raw = _text(messages[-1].get("content"))
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return f"Done. {raw[:200]}"
+    if isinstance(result, dict) and isinstance(result.get("results"), list):  # tool_call bridge
+        result = result["results"][-1] if result["results"] else {}
+        result = result.get("result", result)
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except ValueError:
+                pass
+    if not isinstance(result, dict) or not result.get("success", True):
+        return f"That didn't work: {(result or {}).get('error', raw[:200])}"
+    if "goal_id" in result and "followup" in result:
+        under = result.get("filed_under") or []
+        where = f"Filed under \"{under[-1]}\"." if under else "Noted."
+        return f"{where} I'll check in at {result['followup']['due_local']}."
+    return "Done."
+
+
 def decide(messages: list, tools: list) -> dict:
     if not messages:
         return {"role": "assistant", "content": "ok"}
-    last = messages[-1]
-    if last.get("role") == "tool":
-        return {"role": "assistant", "content": f"Done. {_text(last.get('content'))[:300]}"}
-    user = _text(last.get("content"))
-    m = re.search(r"goal:\s*(.+)", user, re.I)
-    if m:
-        args = {"title": m.group(1).strip().split("\n")[0][:120], "horizon": "week",
-                "follow_up_in": "in 1m", "follow_up_text": "Checking in on this goal: what moved, what's next?"}
-        name, arguments = "ha_goal_add", args
-        if "ha_goal_add" not in {t.get("function", {}).get("name") for t in tools}:
-            # Plugin tools are deferred behind Hermes Tool Search; go through its tool_call bridge.
-            name, arguments = "tool_call", {"calls": [{"name": "ha_goal_add", "arguments": args}]}
-        return {"role": "assistant", "content": None, "tool_calls": [{
-            "id": f"call_{int(time.time() * 1000)}", "type": "function",
-            "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+    if messages[-1].get("role") == "tool":
+        return {"role": "assistant", "content": _reply_to_tool(messages)}
+    user = _text(messages[-1].get("content"))
     system = " ".join(_text(x.get("content")) for x in messages if x.get("role") == "system")
+
+    answered = re.search(r'answers card (\d+) \("([^"]*)"\): ([^.]+)\. It is recorded(?: and done: ([^\n]*?))?\. Confirm', user)
+    if answered:
+        n, _q, choice, result = answered.groups()
+        return {"role": "assistant", "content": f"Got it, {choice}." + (f" Done: {result}." if result else "")}
+
+    directives = re.findall(r"^tool:\s*(\w+)\s+(\{.*\})\s*$", user, re.M)
+    if directives:
+        return _calls([(name, json.loads(args)) for name, args in directives], tools)
+
+    said = user.split("[hyperactive]")[0]
+    m = re.search(r"I want (.+?) by (\w+)", said, re.I) or re.search(r"goal:\s*(.+)", said, re.I)
+    if m:
+        title = m.group(1).strip().split("\n")[0][:120]
+        title = ("Get " + title) if title.lower().startswith("the ") else title[0].upper() + title[1:]
+        args = {"title": title, "horizon": "week", "follow_up_in": "in 1m",
+                "follow_up_text": f"{title}: done yet? If not, what's in the way?"}
+        year = re.search(r"#(\d+) \[year\]", system)
+        if year:
+            args["parent_id"] = int(year.group(1))
+        return _calls([("ha_goal_add", args)], tools)
+
     seen = "hyperactive: the user's objective tree" in system
     return {"role": "assistant", "content": f"(stub model) hyperactive section in system prompt: {seen}"}
 

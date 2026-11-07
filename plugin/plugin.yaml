@@ -1,8 +1,8 @@
 name: hyperactive
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 api_version: 1
-description: "Makes Hermes proactive: an objective tree (life > year > quarter > week), follow-ups, reminders and tap cards, delivered on Hermes's own cron schedule. Everything it does traces back to a goal."
+description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions, then speaks on its own schedule: check-ins, decision reviews, nudges on stalled goals, and tap cards that decide small things for you after two unanswered asks but never money, public or irreversible ones. Every message names the goal it serves."
 author: Justin
 license: MIT
 requires_hermes: ">=0.22.5"
@@ -10,8 +10,18 @@ tags: [productivity, proactive, goals, cron]
 provides_tools:
   - ha_goal_add
   - ha_followup
+  - ha_card
+  - ha_commit
+  - ha_decide
   - ha_status
+provides_hooks:
+  - pre_llm_call
+  - gateway_platform_event
+  - on_session_start
 config_schema:
   pulse_every: {type: str, default: "every 5m", description: "How often the pulse cron job checks for due items."}
   deliver: {type: str, default: "origin", description: "Where proactive messages go (cron deliver grammar, e.g. telegram, local)."}
   quiet_hours: {type: str, default: "", description: "Local window with no proactive messages, e.g. 22:00-07:00. Items are deferred, never dropped."}
+  card_timeout: {type: str, default: "1h", description: "Tap cards are re-asked after this long, and low-stakes ones applied after twice this."}
+  stale_after: {type: str, default: "3d", description: "A week goal with no movement for this long gets one nudge (quarter goals: 4x)."}
+  max_items: {type: int, default: 5, description: "Most items in one proactive message; the rest wait for the next pulse."}
