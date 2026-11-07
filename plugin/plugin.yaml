@@ -5,7 +5,7 @@ api_version: 1
 description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions, then speaks on its own schedule: check-ins, decision reviews, nudges on stalled goals, and tap cards that decide small things for you after two unanswered asks but never money, public or irreversible ones. Every message names the goal it serves."
 author: Justin
 license: MIT
-requires_hermes: ">=0.23.0"
+requires_hermes: ">=0.21.7"
 tags: [productivity, proactive, goals, cron]
 provides_tools:
   - ha_goal_add
@@ -24,4 +24,5 @@ config_schema:
   quiet_hours: {type: str, default: "", description: "Local window with no proactive messages, e.g. 22:00-07:00. Items are deferred, never dropped."}
   card_timeout: {type: str, default: "1h", description: "Tap cards are re-asked after this long, and low-stakes ones applied after twice this."}
   stale_after: {type: str, default: "3d", description: "A week goal with no movement for this long gets one nudge (quarter goals: 4x)."}
+  brief_at: {type: str, default: "08:00", description: "Local time of the daily brief, an agent-mode cron job (one model call a day, skipped when there is nothing to brief). Empty turns it off."}
   max_items: {type: int, default: 5, description: "Most items in one proactive message; the rest wait for the next pulse."}
