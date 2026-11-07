@@ -24,7 +24,7 @@ try:
 except ImportError:  # loaded as a top-level module by the cron shim
     import store  # type: ignore[no-redef]
 
-DEFAULTS = {"quiet_hours": "", "card_timeout": "1h", "stale_after": "3d", "max_items": 5}
+DEFAULTS = {"quiet_hours": "", "card_timeout": "1h", "stale_after": "3d", "max_items": 5, "timezone": ""}
 STAKES_REASON = {"money": "It involves money", "public": "It's public",
                  "irreversible": "It can't be undone"}
 
@@ -35,7 +35,9 @@ def load_settings(data_dir: Path) -> dict:
         saved = json.loads(f.read_text()) if f.exists() else {}
     except ValueError:
         saved = {}
-    return {**DEFAULTS, **{k: v for k, v in saved.items() if v not in (None, "")}}
+    cfg = {**DEFAULTS, **{k: v for k, v in saved.items() if v not in (None, "")}}
+    store.set_timezone(cfg["timezone"])  # Hermes's timezone, written by the plugin
+    return cfg
 
 
 def in_quiet_hours(spec: str, at: datetime) -> bool:
@@ -44,7 +46,7 @@ def in_quiet_hours(spec: str, at: datetime) -> bool:
         return False
     start_s, end_s = (s.strip() for s in spec.split("-", 1))
     start, end = time.fromisoformat(start_s), time.fromisoformat(end_s)
-    t = at.astimezone().time()
+    t = store.local(at).time()
     return start <= t < end if start < end else (t >= start or t < end)
 
 
@@ -231,7 +233,7 @@ def brief(data_dir: Path, at: datetime | None = None) -> str:
     at = at or store.now()
     cfg = load_settings(data_dir)
     stale_after = store.parse_duration(cfg["stale_after"])
-    local = at.astimezone()
+    local = store.local(at)
     end_of_day = local.replace(hour=23, minute=59, second=59, microsecond=0)
     conn = store.connect(data_dir / "hyperactive.db")
     try:

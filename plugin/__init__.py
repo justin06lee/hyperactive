@@ -88,6 +88,15 @@ def _settings(ctx) -> dict:
     }
 
 
+def _hermes_timezone() -> str:
+    """Hermes's timezone (HERMES_TIMEZONE or config `timezone`), '' for server-local."""
+    try:
+        from hermes_time import get_timezone_name
+        return get_timezone_name() or ""
+    except Exception:
+        return ""
+
+
 def _schedule_key(schedule: str) -> str:
     """'every 5 minutes' and 'every 5m' are the same schedule; compare what Hermes displays."""
     try:
@@ -125,7 +134,9 @@ def ensure_pulse(ctx) -> dict:
     often. Returns the pulse job's state, plus the brief job's under "brief"."""
     cfg = _settings(ctx)
     data_dir = _data_dir()
-    (data_dir / "pulse.json").write_text(json.dumps({k: cfg[k] for k in PULSE_SETTINGS}, indent=2))
+    saved = {k: cfg[k] for k in PULSE_SETTINGS}
+    saved["timezone"] = _hermes_timezone()  # the cron script runs outside Hermes; hand it over
+    (data_dir / "pulse.json").write_text(json.dumps(saved, indent=2))
     _write_shims(data_dir)
     specs = _job_specs(cfg)
 
@@ -444,7 +455,7 @@ USAGE = """/ha                          goals, cards, commitments, schedule
 /ha brief                    the data today's brief is written from
 /ha decision <id> keep|revise [new choice]
 /ha done <commitment>        close a commitment
-/ha goal <horizon> <title> [--parent N] [--follow-up 'in 2h']
+/ha goal <horizon> <title> [--parent N] [--why '...'] [--follow-up 'in 2h']
 /ha followup <goal> <when> <text>
 /ha setup | /ha uninstall"""
 
@@ -485,12 +496,15 @@ def _command(ctx, handlers, raw: str) -> str:
             if cmd == "goal" and len(args) >= 2:
                 horizon, rest = args[0], args[1:]
                 parent = follow = None
+                why = ""
                 if "--parent" in rest:
                     i = rest.index("--parent"); parent = int(rest[i + 1]); del rest[i:i + 2]
                 if "--follow-up" in rest:
                     i = rest.index("--follow-up"); follow = rest[i + 1]; del rest[i:i + 2]
+                if "--why" in rest:
+                    i = rest.index("--why"); why = rest[i + 1]; del rest[i:i + 2]
                 out = handlers["ha_goal_add"](conn, {"title": " ".join(rest), "horizon": horizon,
-                                                     "parent_id": parent, "follow_up_in": follow})
+                                                     "parent_id": parent, "follow_up_in": follow, "why": why})
                 msg = f"goal {out['goal_id']}: {' '.join(rest)}"
                 return msg + (f"; check-in at {out['followup']['due_local']}" if follow else "")
             if cmd == "followup" and len(args) >= 3:
@@ -620,6 +634,7 @@ def on_platform_event(platform="", event_type="", payload=None, **_kw):
 # --- registration ------------------------------------------------------------------------------
 
 def register(ctx):
+    store.set_timezone(_hermes_timezone())
     handlers = _make_handlers(ctx)
     for schema in TOOLS:
         ctx.register_tool(name=schema["name"], toolset=PLUGIN, schema=schema, handler=_tool(handlers[schema["name"]]))

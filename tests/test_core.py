@@ -260,3 +260,15 @@ def test_brief_data_is_read_only_and_empty_when_idle(tmp_path, db):
     assert "Active week goals:\n- #2 Open the catalog PR (under Win a hackathon prize)" in out
     assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events  # changed nothing
     assert store.pending_followups(db)[0]["status"] == "pending"
+
+
+def test_hermes_timezone_drives_local_times_and_quiet_hours(tmp_path):
+    (tmp_path / "pulse.json").write_text('{"timezone": "America/New_York", "quiet_hours": "22:00-07:00"}')
+    try:
+        cfg = pulse.load_settings(tmp_path)  # sets the store's timezone, as the cron script does
+        assert store.parse_when("18:30", base=T0) == datetime(2026, 11, 7, 23, 30, tzinfo=timezone.utc)
+        assert store.local_time(T0, at=T0) == "12:00"
+        assert pulse.in_quiet_hours(cfg["quiet_hours"], datetime(2026, 11, 8, 4, 0, tzinfo=timezone.utc))  # 23:00 NY
+        assert not pulse.in_quiet_hours(cfg["quiet_hours"], T0)  # noon NY
+    finally:
+        store.set_timezone("")
