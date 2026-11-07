@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 PLUGIN = "hyperactive"
 PULSE_JOB_NAME = "hyperactive-pulse"
 PULSE_SCRIPT = "hyperactive_pulse.py"
+BRIEF_JOB_NAME = "hyperactive-brief"
+BRIEF_SCRIPT = "hyperactive_brief.py"
+BRIEF_SKILL = f"{PLUGIN}:brief"
+BRIEF_PROMPT = ("Write the user's daily brief from the hyperactive data above, following the "
+                f"{BRIEF_SKILL} skill. Use only that data.")
 PULSE_SETTINGS = ("quiet_hours", "card_timeout", "stale_after", "max_items")
 _HERE = Path(__file__).resolve().parent
 
@@ -35,7 +40,7 @@ _SHIM = '''# Installed by the hyperactive Hermes plugin. Re-created by `hermes h
 import sys
 sys.path.insert(0, {plugin_dir!r})
 import pulse
-sys.exit(pulse.main(["pulse", {data_dir!r}]))
+sys.exit(pulse.main([{mode!r}, {data_dir!r}]))
 '''
 
 
@@ -72,48 +77,94 @@ def _tool(fn):
     return handler
 
 
-# --- the pulse cron job ------------------------------------------------------------------------
+# --- the cron jobs: pulse (no model) and the daily brief (agent) -------------------------------
 
 def _settings(ctx) -> dict:
     return {
         "every": ctx.get_config("pulse_every", default="every 5m") or "every 5m",
         "deliver": ctx.get_config("deliver", default="origin") or "origin",
+        "brief_at": (ctx.get_config("brief_at", default="08:00") or "").strip(),
         **{k: ctx.get_config(k, default=pulse.DEFAULTS[k]) for k in PULSE_SETTINGS},
     }
 
 
+def _schedule_key(schedule: str) -> str:
+    """'every 5 minutes' and 'every 5m' are the same schedule; compare what Hermes displays."""
+    try:
+        from cron.jobs import parse_schedule
+        return str(parse_schedule(schedule).get("display") or schedule)
+    except Exception:
+        return schedule.strip()
+
+
+def _job_specs(cfg: dict) -> list[dict]:
+    jobs = [{"name": PULSE_JOB_NAME, "schedule": cfg["every"], "script": PULSE_SCRIPT, "no_agent": True,
+             "deliver": cfg["deliver"]}]
+    if cfg["brief_at"]:
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", cfg["brief_at"])
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            raise ValueError(f"brief_at must be HH:MM or empty, not {cfg['brief_at']!r}")
+        jobs.append({"name": BRIEF_JOB_NAME, "schedule": f"{int(m.group(2))} {int(m.group(1))} * * *",
+                     "script": BRIEF_SCRIPT, "no_agent": False, "prompt": BRIEF_PROMPT,
+                     "skills": [BRIEF_SKILL], "deliver": cfg["deliver"]})
+    return jobs
+
+
+def _write_shims(data_dir: Path) -> None:
+    scripts = get_hermes_home() / "scripts"  # the only place Hermes cron runs scripts from
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name, mode in ((PULSE_SCRIPT, "pulse"), (BRIEF_SCRIPT, "brief")):
+        shim = _SHIM.format(plugin_dir=str(_HERE), mode=mode, data_dir=str(data_dir))
+        if not (scripts / name).exists() or (scripts / name).read_text() != shim:
+            (scripts / name).write_text(shim)
+
+
 def ensure_pulse(ctx) -> dict:
-    """Write pulse.json and the shim, and make sure exactly one pulse job exists with the
-    configured schedule and delivery target. Safe to call often."""
+    """Write pulse.json and the shims, and make sure exactly one pulse job (and, unless brief_at is
+    empty, one brief job) exists with the configured schedule and delivery target. Safe to call
+    often. Returns the pulse job's state, plus the brief job's under "brief"."""
     cfg = _settings(ctx)
     data_dir = _data_dir()
     (data_dir / "pulse.json").write_text(json.dumps({k: cfg[k] for k in PULSE_SETTINGS}, indent=2))
-    scripts = get_hermes_home() / "scripts"  # the only place Hermes cron runs scripts from
-    scripts.mkdir(parents=True, exist_ok=True)
-    shim = _SHIM.format(plugin_dir=str(_HERE), data_dir=str(data_dir))
-    if not (scripts / PULSE_SCRIPT).exists() or (scripts / PULSE_SCRIPT).read_text() != shim:
-        (scripts / PULSE_SCRIPT).write_text(shim)
+    _write_shims(data_dir)
+    specs = _job_specs(cfg)
 
     listed = json.loads(ctx.dispatch_tool("cronjob_manage", {"action": "list"}) or "{}")
     if str(listed.get("error", "")).startswith("Unknown tool"):
         # `hermes hyperactive ...` runs outside a session, where the cron tool isn't loaded.
-        return _ensure_pulse_cli(cfg["every"], cfg["deliver"])
-    for job in listed.get("jobs", []):
-        if job.get("name") != PULSE_JOB_NAME:
+        return _ensure_jobs_cli(specs)
+    existing = {j.get("name"): j for j in listed.get("jobs", [])}
+    results = {}
+    for spec in specs:
+        job = existing.get(spec["name"])
+        if job:
+            job_id = job.get("job_id") or job.get("id")
+            drift = {}
+            if _schedule_key(str(job.get("schedule") or "")) != _schedule_key(spec["schedule"]):
+                drift["schedule"] = spec["schedule"]
+            if job.get("deliver") != spec["deliver"]:
+                drift["deliver"] = spec["deliver"]
+            if drift:
+                ctx.dispatch_tool("cronjob_manage", {"action": "update", "job_id": job_id, **drift})
+            results[spec["name"]] = {"job_id": job_id, "created": False, "updated": sorted(drift)}
             continue
-        job_id = job.get("job_id") or job.get("id")
-        drift = {k: cfg[v] for k, v in (("schedule", "every"), ("deliver", "deliver"))
-                 if job.get(k) != cfg[v]}
-        if drift:
-            ctx.dispatch_tool("cronjob_manage", {"action": "update", "job_id": job_id, **drift})
-        return {"job_id": job_id, "created": False, "updated": sorted(drift)}
-    created = json.loads(ctx.dispatch_tool("cronjob_manage", {
-        "action": "create", "name": PULSE_JOB_NAME, "schedule": cfg["every"], "script": PULSE_SCRIPT,
-        "no_agent": True, "deliver": cfg["deliver"], "catch_up": True,
-    }) or "{}")
-    if not created.get("success", True) or created.get("error"):
-        raise RuntimeError(f"could not create pulse job: {created}")
-    return {"job_id": created.get("job_id") or created.get("id"), "created": True}
+        created = json.loads(ctx.dispatch_tool("cronjob_manage", {
+            "action": "create", "catch_up": True, **spec}) or "{}")
+        if not created.get("success", True) or created.get("error"):
+            raise RuntimeError(f"could not create {spec['name']} job: {created}")
+        results[spec["name"]] = {"job_id": created.get("job_id") or created.get("id"), "created": True}
+    if not cfg["brief_at"] and BRIEF_JOB_NAME in existing:
+        job = existing[BRIEF_JOB_NAME]
+        ctx.dispatch_tool("cronjob_manage", {"action": "remove", "job_id": job.get("job_id") or job.get("id")})
+        results[BRIEF_JOB_NAME] = {"removed": True}
+    return _result(results)
+
+
+def _result(results: dict) -> dict:
+    out = dict(results.get(PULSE_JOB_NAME, {}))
+    if BRIEF_JOB_NAME in results:
+        out["brief"] = results[BRIEF_JOB_NAME]
+    return out
 
 
 def _hermes_cli(*args) -> subprocess.CompletedProcess:
@@ -121,9 +172,9 @@ def _hermes_cli(*args) -> subprocess.CompletedProcess:
     return subprocess.run([hermes, *args], capture_output=True, text=True, timeout=120)
 
 
-def _cli_pulse_job() -> dict | None:
-    """Find the pulse job in `hermes cron list` output: {'id', 'schedule', 'deliver'}."""
-    job = None
+def _cli_jobs() -> dict:
+    """Our jobs in `hermes cron list` output: {name: {'id', 'name', 'schedule', 'deliver'}}."""
+    jobs, job = {}, None
     for line in _hermes_cli("cron", "list").stdout.splitlines():
         head = re.match(r"\s+([0-9a-f]{8,})\s+\[", line)
         if head:
@@ -132,46 +183,61 @@ def _cli_pulse_job() -> dict | None:
         field = re.match(r"\s+(Name|Schedule|Deliver):\s+(.*\S)", line)
         if job is not None and field:
             job[field.group(1).lower()] = field.group(2)
-            if job.get("name") == PULSE_JOB_NAME and "deliver" in job:
-                return job
-    return None
+            if job.get("name") in (PULSE_JOB_NAME, BRIEF_JOB_NAME) and "deliver" in job:
+                jobs[job["name"]] = job
+    return jobs
 
 
-def _ensure_pulse_cli(every: str, deliver: str) -> dict:
-    job = _cli_pulse_job()
-    if job:
-        edits = []
-        if job.get("schedule") != every:
-            edits += ["--schedule", every]
-        if job.get("deliver") != deliver:
-            edits += ["--deliver", deliver]
-        if edits:
-            _hermes_cli("cron", "edit", job["id"], *edits)
-        return {"job_id": job["id"], "created": False, "updated": [e.lstrip("-") for e in edits[::2]]}
-    made = _hermes_cli("cron", "create", every, "--name", PULSE_JOB_NAME, "--script", PULSE_SCRIPT,
-                       "--no-agent", "--deliver", deliver, "--catch-up", "on")
-    if made.returncode != 0:
-        raise RuntimeError(f"could not create pulse job: {made.stderr.strip() or made.stdout.strip()}")
-    return {"job": PULSE_JOB_NAME, "created": True}
+def _ensure_jobs_cli(specs: list[dict]) -> dict:
+    existing = _cli_jobs()
+    results = {}
+    for spec in specs:
+        job = existing.get(spec["name"])
+        if job:
+            edits = []
+            if _schedule_key(job.get("schedule", "")) != _schedule_key(spec["schedule"]):
+                edits += ["--schedule", spec["schedule"]]
+            if job.get("deliver") != spec["deliver"]:
+                edits += ["--deliver", spec["deliver"]]
+            if edits:
+                _hermes_cli("cron", "edit", job["id"], *edits)
+            results[spec["name"]] = {"job_id": job["id"], "created": False,
+                                     "updated": [e.lstrip("-") for e in edits[::2]]}
+            continue
+        args = ["cron", "create", spec["schedule"]] + ([spec["prompt"]] if spec.get("prompt") else [])
+        args += ["--name", spec["name"], "--script", spec["script"], "--deliver", spec["deliver"],
+                 "--catch-up", "on"]
+        args += ["--no-agent"] if spec["no_agent"] else []
+        for skill in spec.get("skills", []):
+            args += ["--skill", skill]
+        made = _hermes_cli(*args)
+        if made.returncode != 0:
+            raise RuntimeError(f"could not create {spec['name']} job: {made.stderr.strip() or made.stdout.strip()}")
+        results[spec["name"]] = {"job": spec["name"], "created": True}
+    if BRIEF_JOB_NAME in existing and not any(s["name"] == BRIEF_JOB_NAME for s in specs):
+        _hermes_cli("cron", "remove", existing[BRIEF_JOB_NAME]["id"])
+        results[BRIEF_JOB_NAME] = {"removed": True}
+    return _result(results)
 
 
 def remove_pulse(ctx) -> str:
-    """Remove the pulse job and shim. The data (goals, history) stays unless deleted by hand."""
+    """Remove both cron jobs and shims. The data (goals, history) stays unless deleted by hand."""
     removed = []
     listed = json.loads(ctx.dispatch_tool("cronjob_manage", {"action": "list"}) or "{}")
     if str(listed.get("error", "")).startswith("Unknown tool"):
-        job = _cli_pulse_job()
-        if job and _hermes_cli("cron", "remove", job["id"]).returncode == 0:
-            removed.append(f"cron job {job['id']}")
+        for job in _cli_jobs().values():
+            if _hermes_cli("cron", "remove", job["id"]).returncode == 0:
+                removed.append(f"cron job {job['name']}")
     else:
         for job in listed.get("jobs", []):
-            if job.get("name") == PULSE_JOB_NAME:
+            if job.get("name") in (PULSE_JOB_NAME, BRIEF_JOB_NAME):
                 ctx.dispatch_tool("cronjob_manage", {"action": "remove", "job_id": job.get("job_id")})
-                removed.append(f"cron job {job.get('job_id')}")
-    shim = get_hermes_home() / "scripts" / PULSE_SCRIPT
-    if shim.exists():
-        shim.unlink()
-        removed.append(str(shim))
+                removed.append(f"cron job {job.get('name')}")
+    for name in (PULSE_SCRIPT, BRIEF_SCRIPT):
+        shim = get_hermes_home() / "scripts" / name
+        if shim.exists():
+            shim.unlink()
+            removed.append(str(shim))
     settings = _data_dir() / "pulse.json"
     if settings.exists():
         settings.unlink()  # also stops the session-start self-heal from recreating the job
@@ -375,6 +441,7 @@ def _make_handlers(ctx):
 USAGE = """/ha                          goals, cards, commitments, schedule
 /ha answer <card> <option>   answer a tap card
 /ha why [event]              why hyperactive sent its last message
+/ha brief                    the data today's brief is written from
 /ha decision <id> keep|revise [new choice]
 /ha done <commitment>        close a commitment
 /ha goal <horizon> <title> [--parent N] [--follow-up 'in 2h']
@@ -394,7 +461,10 @@ def _command(ctx, handlers, raw: str) -> str:
             cfg = _settings(ctx)
             state = "created" if r.get("created") else ("updated" if r.get("updated") else "already running")
             return (f"Pulse job {state}: {cfg['every']}, delivering to {cfg['deliver']}"
-                    + (f", quiet {cfg['quiet_hours']}" if cfg["quiet_hours"] else "") + ".")
+                    + (f", quiet {cfg['quiet_hours']}" if cfg["quiet_hours"] else "") + ". "
+                    + (f"Daily brief at {cfg['brief_at']}." if cfg["brief_at"] else "No daily brief (brief_at is empty)."))
+        if cmd == "brief":
+            return pulse.brief(_data_dir()) or "Nothing for a brief: no active goals or due items."
         if cmd == "uninstall":
             return remove_pulse(ctx)
         conn = _db()
@@ -558,7 +628,7 @@ def register(ctx):
         return _command(ctx, handlers, raw)
 
     ctx.register_command("ha", command, description="hyperactive: goals, cards and proactive follow-ups",
-                         args_hint="[answer|why|decision|done|goal|followup|setup]")
+                         args_hint="[answer|why|brief|decision|done|goal|followup|setup]")
     ctx.register_cli_command(name=PLUGIN, help="hyperactive goals, cards and proactive follow-ups",
                              setup_fn=_setup_cli,
                              handler_fn=lambda args: print(command(shlex.join(getattr(args, "words", []) or []))))
