@@ -187,8 +187,9 @@ _GOAL_ID = {"type": "integer", "description": "Goal this serves (see the goal tr
 GOAL_ADD = {
     "name": "ha_goal_add",
     "description": ("Record one of the user's goals in their objective tree (life > year > quarter > week). "
-                    "Use when the user states something they want to achieve. Link it to a parent goal when one "
-                    "fits (see the goal tree in the system prompt). Optionally schedule a proactive check-in."),
+                    "Use when the user states something they want to achieve, including 'X by <day>' (horizon "
+                    "week). Link it to a parent goal when one fits (see the goal tree in the system prompt). Pass "
+                    "follow_up_in to schedule one check-in; that is usually all a new goal needs."),
     "parameters": {
         "type": "object",
         "properties": {
@@ -227,8 +228,10 @@ CARD = {
         "an hour later the recommendation is applied ONLY when stakes is 'low'. Use stakes money, public or "
         "irreversible for anything that spends money, is visible to others, or can't be undone: those wait "
         "for the user forever. `action` is what the plugin itself does if the recommended answer wins: "
-        "{type: reschedule, followup_id, when} | {type: schedule, text, when} | "
-        "{type: goal_status, goal_id, status}. Answer: card_id + answer (when the user replies to a card)."),
+        "{type: reschedule, followup_id, when, text (optional new wording)} | {type: schedule, text, when} | "
+        "{type: goal_status, goal_id, status}; scheduled follow-up ids are in the system prompt and ha_status. "
+        "A low-stakes card without an action only records the answer. "
+        "Answer: card_id + answer (when the user replies to a card, even loosely: 'yeah move it')."),
     "parameters": {
         "type": "object",
         "properties": {
@@ -247,8 +250,10 @@ CARD = {
 
 COMMIT = {
     "name": "ha_commit",
-    "description": ("Track a promise in either direction: i_owe (the user promised someone something) or "
-                    "they_owe (someone promised the user). hyperactive brings it up when it's due. "
+    "description": ("Track a promise between the user and another named person, in either direction: i_owe "
+                    "(the user promised someone something) or they_owe (someone promised the user). A deadline "
+                    "the user sets for themselves is a goal (ha_goal_add), not a commitment. "
+                    "hyperactive brings it up when it's due. "
                     "To close one: commitment_id + status done|dropped."),
     "parameters": {
         "type": "object",
@@ -335,9 +340,13 @@ def _make_handlers(ctx):
     def card(conn, a):
         if a.get("card_id"):
             return store.answer_card(conn, a["card_id"], a.get("answer", ""))
-        return scheduled(store.add_card(conn, a.get("question", ""), a.get("recommended", ""),
-                                        options=a.get("options"), stakes=a.get("stakes", "low"),
-                                        goal_id=a.get("goal_id"), action=a.get("action"), when=a.get("when", "now")))
+        row = scheduled(store.add_card(conn, a.get("question", ""), a.get("recommended", ""),
+                                       options=a.get("options"), stakes=a.get("stakes", "low"),
+                                       goal_id=a.get("goal_id"), action=a.get("action"), when=a.get("when", "now")))
+        if row["stakes"] == "low" and not a.get("action"):
+            row["note"] = ("No action attached: if the recommendation is applied, nothing changes but the "
+                           "record. Ask again with an action if it should do something.")
+        return row
 
     def commit(conn, a):
         if a.get("commitment_id"):
@@ -435,14 +444,20 @@ def _system_prompt_section(_info) -> str:
         conn = _db()
         try:
             tree = store.render_tree(conn, max_lines=25)
+            pend = store.pending_followups(conn)[:10]
         finally:
             conn.close()
     except Exception:
         return ""
     return ("## hyperactive: the user's objective tree\n"
-            "You are proactive. Tie what you do to one of these goals. Record goals (ha_goal_add), promises "
-            "both ways (ha_commit) and decisions (ha_decide); schedule check-ins yourself (ha_followup) and "
-            "ask quick calls as tap cards (ha_card) instead of waiting to be asked.\n" + tree)
+            "You are proactive. Tie what you do to one of these goals. Record goals, including 'X by <day>' "
+            "(ha_goal_add with follow_up_in), promises to or from other people (ha_commit) and decisions "
+            "(ha_decide); schedule check-ins yourself (ha_followup) and ask quick calls as tap cards "
+            "(ha_card) instead of waiting to be asked. One check-in per thing unless the user asks for more.\n"
+            + tree
+            + ("\nScheduled (follow-up ids, for card actions):\n" + "\n".join(
+                f"- follow-up {f['id']} {store.local_time(f['due_at'])} (goal #{f['goal_id']}): {f['text'][:80]}"
+                for f in pend) if pend else ""))
 
 
 def _attention_lines(conn, at) -> list[str]:
