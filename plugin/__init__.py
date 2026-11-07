@@ -147,7 +147,7 @@ def _ensure_pulse_cli(every: str, deliver: str) -> dict:
             edits += ["--deliver", deliver]
         if edits:
             _hermes_cli("cron", "edit", job["id"], *edits)
-        return {"job_id": job["id"], "created": False, "updated": edits[::2]}
+        return {"job_id": job["id"], "created": False, "updated": [e.lstrip("-") for e in edits[::2]]}
     made = _hermes_cli("cron", "create", every, "--name", PULSE_JOB_NAME, "--script", PULSE_SCRIPT,
                        "--no-agent", "--deliver", deliver, "--catch-up", "on")
     if made.returncode != 0:
@@ -381,7 +381,11 @@ def _command(ctx, handlers, raw: str) -> str:
     cmd, args = (argv[0], argv[1:]) if argv else ("status", [])
     try:
         if cmd == "setup":
-            return f"hyperactive pulse: {ensure_pulse(ctx)}"
+            r = ensure_pulse(ctx)
+            cfg = _settings(ctx)
+            state = "created" if r.get("created") else ("updated" if r.get("updated") else "already running")
+            return (f"Pulse job {state}: {cfg['every']}, delivering to {cfg['deliver']}"
+                    + (f", quiet {cfg['quiet_hours']}" if cfg["quiet_hours"] else "") + ".")
         if cmd == "uninstall":
             return remove_pulse(ctx)
         conn = _db()
