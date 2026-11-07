@@ -1,5 +1,5 @@
 name: hyperactive
-version: 0.2.0
+version: 0.3.0
 manifest_version: 2
 api_version: 1
 description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions, then speaks on its own schedule: check-ins, decision reviews, nudges on stalled goals, and tap cards that decide small things for you after two unanswered asks but never money, public or irreversible ones. Every message names the goal it serves."
