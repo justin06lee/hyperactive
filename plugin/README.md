@@ -55,7 +55,7 @@ schedules its own check-ins. A gateway (`hermes gateway`) has to be running for 
 /ha why [event]              why hyperactive sent its last message
 /ha decision <id> keep|revise [new choice]
 /ha done <commitment>        close a commitment
-/ha goal <horizon> <title> [--parent N] [--follow-up 'in 2h']
+/ha goal <horizon> <title> [--parent N] [--why '...'] [--follow-up 'in 2h']
 /ha followup <goal> <when> <text>
 /ha setup | /ha uninstall
 ```

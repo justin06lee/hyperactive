@@ -13,6 +13,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 HORIZONS = ("life", "year", "quarter", "week")
 STAKES = ("low", "money", "public", "irreversible")
@@ -69,6 +70,22 @@ class StoreError(ValueError):
     """A caller mistake worth showing to the model or the user verbatim."""
 
 
+_TZ: ZoneInfo | None = None  # Hermes's configured timezone; None = this process's local time
+
+
+def set_timezone(name: str) -> None:
+    """Use Hermes's timezone setting (an IANA name) for local times; '' or invalid = system local."""
+    global _TZ
+    try:
+        _TZ = ZoneInfo(name) if name else None
+    except Exception:
+        _TZ = None
+
+
+def local(dt: datetime) -> datetime:
+    return dt.astimezone(_TZ)
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -110,15 +127,15 @@ def _parse_clock(text: str, base: datetime) -> datetime | None:
         hour = hour % 12 + (12 if ampm == "pm" else 0)
     if hour > 23 or minute > 59:
         return None
-    local = base.astimezone()
-    dt = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    here = local(base)
+    dt = here.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if day in ("tomorrow", "tmrw"):
         dt += timedelta(days=1)
     elif day in _DAYS:
-        dt += timedelta(days=(_DAYS.index(day) - local.weekday()) % 7)
-        if dt <= local:
+        dt += timedelta(days=(_DAYS.index(day) - here.weekday()) % 7)
+        if dt <= here:
             dt += timedelta(days=7)
-    elif day is None and dt <= local:
+    elif day is None and dt <= here:
         dt += timedelta(days=1)
     return dt.astimezone(timezone.utc)
 
@@ -139,17 +156,17 @@ def parse_when(when: str, *, base: datetime | None = None) -> datetime:
         dt = datetime.fromisoformat(text)
     except ValueError:
         try:  # local_time's own far-out format, 'Nov 14 07:00'
-            dt = datetime.strptime(f"{base.astimezone().year} {text}", "%Y %b %d %H:%M")
+            dt = datetime.strptime(f"{local(base).year} {text}", "%Y %b %d %H:%M")
         except ValueError:
             raise StoreError(f"can't read time {when!r} (try 'in 2h', '1d', 'tomorrow 07:00' "
                              "or 2026-11-08T09:00)") from None
-    return (dt if dt.tzinfo else dt.astimezone()).astimezone(timezone.utc)
+    return (dt if dt.tzinfo else dt.replace(tzinfo=_TZ) if _TZ else dt.astimezone()).astimezone(timezone.utc)
 
 
 def local_time(ts: str | datetime, *, at: datetime | None = None) -> str:
     """'18:00' today, 'Sat 07:00' within a week, 'Nov 14 07:00' beyond. Local time."""
-    dt = (parse_iso(ts) if isinstance(ts, str) else ts).astimezone()
-    ref = (at or now()).astimezone()
+    dt = local(parse_iso(ts) if isinstance(ts, str) else ts)
+    ref = local(at or now())
     if dt.date() == ref.date():
         return dt.strftime("%H:%M")
     if abs((dt.date() - ref.date()).days) < 7:
