@@ -21,31 +21,35 @@ proactive message names the goal it serves, and nothing irreversible is ever dec
  └────────────────────────────────────────────────┘   └──────────────────────────────┘
 ```
 
-**Hermes mechanisms used (all public, all verified in the skeleton unless marked *planned*)**
-- `ctx.register_tool` ×3 (`ha_goal_add`, `ha_followup`, `ha_status`). Plugin tools are deferred
-  behind Tool Search by default, so the model reaches them via `tool_search`/`tool_call`.
+**Hermes mechanisms used (all public; verified on the scratch install unless marked)**
+- `ctx.register_tool` ×6: `ha_goal_add`, `ha_followup`, `ha_card`, `ha_commit`, `ha_decide`,
+  `ha_status`. By default, plugin tools sit behind Tool Search (`tool_search`/`tool_call`).
 - `ctx.register_system_prompt_section("hyperactive.goals")`: the live goal tree, frozen per session.
 - `ctx.register_command("ha")` + `ctx.register_cli_command("hyperactive")`, `ctx.register_skill`.
-- `ctx.dispatch_tool("cronjob_manage", …)` to create **one** recurring cron job: `no_agent=True`,
-  `script=hyperactive_pulse.py` (a shim the plugin writes to `HERMES_HOME/scripts/`; cron only runs
-  scripts from there). Outside a session (CLI) it falls back to `hermes cron create`.
+- `ctx.dispatch_tool("cronjob_manage", …)` keeps **one** recurring cron job in place: `no_agent=True`,
+  `script=hyperactive_pulse.py` (a shim the plugin writes to `HERMES_HOME/scripts/`). It also syncs
+  schedule and deliver drift. Outside a session (CLI), it falls back to `hermes cron list/create/edit/remove`.
+- Hooks:
+  - `pre_llm_call`: answers a card on a bare-option reply and injects due items.
+  - `on_session_start`: self-heals the job and shim once set up.
+  - `gateway_platform_event`: a Telegram reaction answers a card. *Written, untested: no bot yet.*
 - `plugins.plugin_storage.plugin_data_dir` for SQLite, `ctx.get_config` + `config_schema`.
-- *Planned:* `register_automation_blueprint` (daily brief, weekly review as agent-mode cron
-  jobs using the plugin skill), `pre_llm_call` (inject due cards/commitments into the turn),
-  `gateway_platform_event` (Telegram reaction = tap on a card), `post_llm_call` (spot new
-  commitments, "I'll send it Friday").
+- *Planned:* `register_automation_blueprint` (daily brief, weekly review as agent-mode cron jobs) and
+  `post_llm_call` (spot new commitments such as "I'll send it Friday").
 
 **Decision: no MCP server for v1.** Native plugin tools get Hermes approvals, hooks and catalog
 capability checks for free, with no extra process. An MCP or plugin-RPC read API for the midna app
 can come later on top of the same `store.py`.
 
 **Data model** (`plugin/store.py`, one SQLite file). `goals(parent_id, horizon, title, why,
-status, last_moved_at)` · `tasks(goal_id, due_at, status)` · `commitments(goal_id,
+status, last_moved_at, nudged_at)` · `tasks(goal_id, due_at, status)` · `commitments(goal_id,
 direction i_owe|they_owe, person_id, what, due_at)` · `decisions(goal_id, choice, rationale,
 review_at)` · `people(name, notes, last_contact_at)` · `memories(text, tags)` ·
 `followups(goal_id, kind followup|reminder|nudge|brief, text, due_at, status)` ·
-`cards(goal_id, question, options, recommended, stakes low|money|public|irreversible, asked_at,
-reasked_at, answer)` · `events` (an append-only audit of every autonomous act, with its goal).
+`cards(goal_id, question, options, recommended, stakes low|money|public|irreversible, action,
+asked_at, reasked_at, held_at, answer, answered_by)` · `events(kind, goal_id, ref)`: an append-only
+audit of every autonomous act, with its goal and cause, which `/ha why` reads. Rows without a
+goal are filed under an "Inbox" goal.
 
 **Proactive loop.** (1) Capture: the model records goals and commitments through tools and
 schedules its own check-ins. (2) Pulse: a cron job runs every N minutes with **no LLM**. It
@@ -53,7 +57,9 @@ delivers due follow-ups, re-asks unanswered cards, and defers (never drops) anyt
 hours. Empty output means silence. (3) Think: agent-mode cron jobs (daily brief, stale-goal
 nudges, decision reviews) read the store and write prose. (4) Card rule (`store.card_action`):
 ask, re-ask after 1h, and after another hour apply the recommendation **only if stakes=low**.
-Money, public and irreversible cards stay held until a human answers. The rule is unit-tested.
+Money, public and irreversible cards get one hold notice, then wait for a human. "Apply" runs a
+typed action that the plugin performs itself (`reschedule`, `schedule`, `goal_status`), never a tool
+call. The rule is unit-tested and has run live through cron.
 
 **In scope for Wednesday:** goal tree, follow-ups and reminders, commitments both ways, decisions
 with review dates, daily brief, stale-goal nudge, tap cards with the timeout rule, quiet hours,
@@ -73,4 +79,5 @@ people/CRM depth, embeddings, a Desktop UI, MCP, multi-user, and anything midna-
 
 **Dev setup.** `vendor/hermes-agent` is a read-only clone at 981791d. `.scratch/` holds a Python 3.14
 venv with an editable install of a local clone (Hermes refuses wheel builds), `HERMES_HOME`
-(`.scratch/env.sh`), and a stub model (`dev/stub_llm.py`). `dev/smoke.sh` runs the end-to-end test.
+(`.scratch/env.sh`), and a stub model (`dev/stub_llm.py`). `dev/smoke.sh` runs the end-to-end test;
+`dev/demo.sh` runs the 3 demo moments with 1-minute timings and prints what the phone shows.
