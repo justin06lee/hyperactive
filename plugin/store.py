@@ -93,18 +93,56 @@ def parse_duration(text: str) -> timedelta:
             "w": timedelta(weeks=n)}[unit]
 
 
+_CLOCK = re.compile(r"(?:(today|tomorrow|tmrw|mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+(?:at\s+)?)?"
+                    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?")
+_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _parse_clock(text: str, base: datetime) -> datetime | None:
+    """'07:00', '7am', 'tomorrow 7:30', 'Sun 07:00' (as local_time prints it) -> next such local time."""
+    m = _CLOCK.fullmatch(text.lower())
+    if not m or (m.group(3) is None and m.group(4) is None):
+        return None
+    day, hour, minute, ampm = m.group(1), int(m.group(2)), int(m.group(3) or 0), m.group(4)
+    if ampm:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ampm == "pm" else 0)
+    if hour > 23 or minute > 59:
+        return None
+    local = base.astimezone()
+    dt = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if day in ("tomorrow", "tmrw"):
+        dt += timedelta(days=1)
+    elif day in _DAYS:
+        dt += timedelta(days=(_DAYS.index(day) - local.weekday()) % 7)
+        if dt <= local:
+            dt += timedelta(days=7)
+    elif day is None and dt <= local:
+        dt += timedelta(days=1)
+    return dt.astimezone(timezone.utc)
+
+
 def parse_when(when: str, *, base: datetime | None = None) -> datetime:
-    """'now' / 'in 2m' / '2h' / '3d' / ISO timestamp (local if naive) -> aware UTC datetime."""
+    """'now' / 'in 2m' / '2h' / '3d' / '7am' / 'tomorrow 07:00' / 'Sun 07:00' / 'Nov 14 07:00' /
+    ISO timestamp (local if naive) -> aware UTC datetime."""
     base = base or now()
     text = (when or "").strip()
     if text.lower() in ("", "now"):
         return base
     if _DURATION.fullmatch(text.lower()):
         return base + parse_duration(text)
+    clock = _parse_clock(text, base)
+    if clock:
+        return clock
     try:
         dt = datetime.fromisoformat(text)
     except ValueError:
-        raise StoreError(f"can't read time {when!r} (try 'in 2h', '1d' or 2026-11-08T09:00)") from None
+        try:  # local_time's own far-out format, 'Nov 14 07:00'
+            dt = datetime.strptime(f"{base.astimezone().year} {text}", "%Y %b %d %H:%M")
+        except ValueError:
+            raise StoreError(f"can't read time {when!r} (try 'in 2h', '1d', 'tomorrow 07:00' "
+                             "or 2026-11-08T09:00)") from None
     return (dt if dt.tzinfo else dt.astimezone()).astimezone(timezone.utc)
 
 
@@ -392,7 +430,7 @@ def review_decision(conn, decision_id: int, verdict: str, choice: str = "", revi
 
 # Typed actions a card may carry. The plugin performs these itself; never an arbitrary tool call.
 ACTIONS = {
-    "reschedule": "move a pending follow-up/reminder: {type, followup_id, when}",
+    "reschedule": "move a pending follow-up/reminder: {type, followup_id, when, text?}",
     "schedule": "schedule a new follow-up under the card's goal: {type, text, when}",
     "goal_status": "set a goal's status: {type, goal_id, status: done|paused|dropped|active}",
 }
@@ -404,6 +442,13 @@ def _options(options) -> list[str]:
         options = [o.strip() for o in re.split(r"[,/|]", options)]
     opts = [str(o).strip() for o in (options or []) if str(o).strip()]
     return opts or ["yes", "no"]
+
+
+def _action_when(when: str) -> str:
+    """Durations ('in 1m') count from when the action runs; clock times ('tomorrow 07:00') are fixed
+    now, so a card applied after midnight doesn't slide a day."""
+    parse_when(when)
+    return when if _DURATION.fullmatch((when or "").strip().lower()) else iso(parse_when(when))
 
 
 def validate_action(conn, action) -> dict:
@@ -421,13 +466,14 @@ def validate_action(conn, action) -> dict:
         f = get_followup(conn, int(action.get("followup_id") or 0))
         if f is None or f["status"] != "pending":
             raise StoreError("reschedule needs the id of a pending follow-up (see ha_status)")
-        parse_when(action.get("when", ""))
-        return {"type": kind, "followup_id": f["id"], "when": action["when"]}
+        out = {"type": kind, "followup_id": f["id"], "when": _action_when(action.get("when", ""))}
+        if (action.get("text") or "").strip():
+            out["text"] = action["text"].strip()
+        return out
     if kind == "schedule":
         if not (action.get("text") or "").strip():
             raise StoreError("schedule needs text")
-        parse_when(action.get("when", ""))
-        return {"type": kind, "text": action["text"].strip(), "when": action["when"]}
+        return {"type": kind, "text": action["text"].strip(), "when": _action_when(action.get("when", ""))}
     if get_goal(conn, int(action.get("goal_id") or 0)) is None:
         raise StoreError("goal_status needs a valid goal_id")
     if action.get("status") not in GOAL_STATUSES:
@@ -515,8 +561,9 @@ def apply_action(conn, card: dict) -> str:
         if f is None or f["status"] != "pending":
             return f"follow-up #{act['followup_id']} was no longer pending, so nothing moved"
         due = parse_when(act["when"])
-        conn.execute("UPDATE followups SET due_at=? WHERE id=?", (iso(due), f["id"]))
-        return f"moved \"{f['text']}\" to {local_time(due)}"
+        text = act.get("text") or f["text"]
+        conn.execute("UPDATE followups SET due_at=?, text=? WHERE id=?", (iso(due), text, f["id"]))
+        return f"moved \"{text}\" to {local_time(due)}"
     if kind == "schedule":
         f = add_followup(conn, card["goal_id"], act["text"], act["when"])
         return f"I'll remind you at {f['due_local']}"

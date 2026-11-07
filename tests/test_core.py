@@ -96,6 +96,19 @@ def test_low_card_flow_applies_typed_action(tmp_path, db):
     assert pulse.run(tmp_path, at=later(10)) == ""
 
 
+def test_reschedule_can_reword_and_fixes_clock_times(db):
+    fit = store.add_goal(db, "Stay fit", "quarter")
+    gym = store.add_followup(db, fit, "Gym at 6am.", "in 1d", kind="reminder")
+    c = store.add_card(db, "Move gym to 7am?", "yes", goal_id=fit,
+                       action={"type": "reschedule", "followup_id": gym["id"], "when": "tomorrow 07:00",
+                               "text": "Gym at 7am."})
+    act = store.get_card(db, c["id"])["action"]
+    assert act["when"] == store.iso(store.parse_when("tomorrow 07:00"))  # frozen at creation
+    r = store.answer_card(db, c["id"], "yes")
+    assert r["result"].startswith('moved "Gym at 7am." to')
+    assert store.get_followup(db, gym["id"])["text"] == "Gym at 7am."
+
+
 def test_money_card_is_held_never_applied(tmp_path, db):
     site = store.add_goal(db, "Keep the site online", "quarter")
     store.add_card(db, "Pay the $40 domain renewal?", "pay", options=["pay", "skip"], stakes="money",
@@ -202,6 +215,26 @@ def test_parse_when():
     assert store.parse_when("2026-11-08T09:00:00+00:00") == datetime(2026, 11, 8, 9, tzinfo=timezone.utc)
     with pytest.raises(store.StoreError):
         store.parse_when("next tuesday-ish")
+
+
+def test_parse_when_clock_times(monkeypatch):
+    monkeypatch.setenv("TZ", "UTC")
+    import time
+    time.tzset()
+    try:  # T0 is Sat Nov 7 17:00 UTC
+        at = lambda d, h, m=0: datetime(2026, 11, d, h, m, tzinfo=timezone.utc)
+        assert store.parse_when("18:30", base=T0) == at(7, 18, 30)
+        assert store.parse_when("7am", base=T0) == at(8, 7)          # already past today: tomorrow
+        assert store.parse_when("tomorrow 07:00", base=T0) == at(8, 7)
+        assert store.parse_when("Sun 07:00", base=T0) == at(8, 7)    # local_time's own format
+        assert store.parse_when("Saturday 9pm", base=T0) == at(7, 21)
+        assert store.parse_when("Sat 09:00", base=T0) == at(14, 9)   # past this Saturday: next week
+        assert store.parse_when("Nov 14 07:00", base=T0) == at(14, 7)
+        with pytest.raises(store.StoreError):
+            store.parse_when("25:00", base=T0)
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
 
 
 def test_match_option():
