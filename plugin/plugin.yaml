@@ -5,7 +5,7 @@ api_version: 1
 description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions, then speaks on its own schedule: check-ins, decision reviews, nudges on stalled goals, and tap cards that decide small things for you after two unanswered asks but never money, public or irreversible ones. Every message names the goal it serves."
 author: Justin
 license: MIT
-requires_hermes: ">=0.22.5"
+requires_hermes: ">=0.23.0"
 tags: [productivity, proactive, goals, cron]
 provides_tools:
   - ha_goal_add

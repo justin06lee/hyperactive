@@ -1,0 +1,31 @@
+# DRAFT for NousResearch/hermes-agent plugin-catalog/hyperactive.yaml. Not submitted.
+# TODO before the PR: real repo URL, 40-char sha of the pinned commit, maintainer handle, image.
+name: hyperactive
+title: hyperactive
+repo: https://github.com/OWNER/hyperactive
+sha: "0000000000000000000000000000000000000000"  # placeholder
+subdir: plugin
+version: "0.2.0"
+description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions with review dates, and speaks first on Hermes's own cron: check-ins, decision reviews, nudges on stalled goals, and tap cards with a recommended answer. An unanswered card is re-asked after an hour and, only if low stakes, applied an hour later as a typed action the plugin performs itself (move or schedule its own reminder, set a goal's status); money, public and irreversible calls always wait for the person. Every message names the goal it serves and /ha why explains it. Disclosure — stores data in HERMES_HOME/plugin-data/hyperactive/; on first use or `hermes hyperactive setup` writes a 4-line shim to HERMES_HOME/scripts/hyperactive_pulse.py and creates one recurring no-agent cron job (hyperactive-pulse) whose output Hermes delivers to the configured target; once set up, re-creates a missing job or shim on session start; the `hermes hyperactive` CLI runs `hermes cron` subprocesses; pre_llm_call appends a few lines of due items to turns and records a card answer when the message is exactly an option; reads Telegram reactions via gateway_platform_event. No network calls, model calls or telemetry of its own; no secrets; `hermes hyperactive uninstall` removes the job and shim."
+maintainer: OWNER
+tier: community
+category: automation
+requires_hermes: ">=0.23.0"
+docs_url: https://github.com/OWNER/hyperactive/tree/SHA/plugin#readme
+screenshots: []
+readme: true
+platforms: []
+capabilities:
+  provides_tools:
+    - ha_goal_add
+    - ha_followup
+    - ha_card
+    - ha_commit
+    - ha_decide
+    - ha_status
+  provides_hooks:
+    - pre_llm_call
+    - gateway_platform_event
+    - on_session_start
+  provides_middleware: []
+  requires_env: []
