@@ -1,0 +1,56 @@
+{
+  "banner": {
+    "tagline": "Hermes, but it texts you first.",
+    "blurb": "Keeps your goals, promises and decisions, then speaks on its own schedule. Small calls are settled for you after two unanswered asks. Money, public and irreversible ones never are.",
+    "card": "Move tomorrow's gym from 6am to 7am?  yes / no\nI'd go with yes. If I don't hear back, I'll do that in 2h.\nReply yes or no.",
+    "card_meta": "goal: Stay fit (quarter) · card 1"
+  },
+  "screens": [
+    {
+      "slug": "listens",
+      "title": "It listens and commits",
+      "caption": "A goal with a deadline is filed under its parent, with one check-in.",
+      "messages": [
+        {"from": "you", "text": "I want the hackathon PR open by Tuesday."},
+        {"from": "hermes", "text": "I've logged \"Open the hackathon PR by Tuesday (Nov 10)\" under your goal to win a hackathon prize. I'll check in with you Monday at 9:00 to see how far along it is and whether anything is blocking you."}
+      ]
+    },
+    {
+      "slug": "speaks-first",
+      "title": "It speaks first",
+      "caption": "The check-in arrives on its own. Quiet hours hold messages; they never drop them.",
+      "messages": [
+        {"from": "hermes", "text": "Hackathon PR is due tomorrow (Tuesday Nov 10). How far along is it, and what's blocking you?\ngoal: Open the hackathon PR by Tuesday (Nov 10) (week)", "meta": "Mon 09:00 · nobody typed first"}
+      ]
+    },
+    {
+      "slug": "low-stakes-applied",
+      "title": "Small calls get settled",
+      "caption": "A low-stakes card is asked, asked again, then applied by the plugin itself.",
+      "messages": [
+        {"from": "hermes", "text": "Move tomorrow's gym from 6am to 7am?  yes / no\nI'd go with yes. If I don't hear back, I'll do that in 2h.\nReply yes or no.\ngoal: Stay fit (quarter) · card 1", "meta": "21:00"},
+        {"from": "hermes", "text": "Still open: Move tomorrow's gym from 6am to 7am?  yes / no\nStill no answer. I'll go with yes in 1h.\ngoal: Stay fit (quarter) · card 1", "meta": "22:00"},
+        {"from": "hermes", "text": "No reply on \"Move tomorrow's gym from 6am to 7am?\", so I went with yes: moved \"Gym at 7am.\" to Sun 07:00.\ngoal: Stay fit (quarter) · card 1", "meta": "23:00"}
+      ]
+    },
+    {
+      "slug": "money-held",
+      "title": "It knows its limits",
+      "caption": "Money, public and irreversible calls get one notice, then wait for you.",
+      "messages": [
+        {"from": "hermes", "text": "Pay the $40 domain renewal for the site tonight?  yes / no\nI'd go with yes, but it's yours to decide. It involves money.\nReply yes or no.\ngoal: Keep the site online (quarter) · card 2", "meta": "17:00"},
+        {"from": "hermes", "text": "\"Pay the $40 domain renewal for the site tonight?\" is still open. It involves money, so I won't decide it for you.\nReply yes or no when you're ready.\ngoal: Keep the site online (quarter) · card 2", "meta": "19:00"},
+        {"from": "you", "text": "yes, pay it"}
+      ]
+    },
+    {
+      "slug": "why",
+      "title": "Every message traces to a goal",
+      "caption": "/ha why names the cause and the goals a message serves.",
+      "messages": [
+        {"from": "you", "text": "/ha why"},
+        {"from": "hermes", "text": "Mon 09:00 (event 14)\n  sent: Hackathon PR is due tomorrow (Tuesday Nov 10). How far along is it...\n  why:  follow-up #2, scheduled Sat 11:06 for Mon 09:00, came due\n  goal: Open the hackathon PR by Tuesday (Nov 10) (week) < Win a hackathon prize (year)"}
+      ]
+    }
+  ]
+}
