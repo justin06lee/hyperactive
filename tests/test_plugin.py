@@ -118,3 +118,12 @@ def test_job_specs_pulse_and_brief():
     with pytest.raises(ValueError):
         mod._job_specs({**cfg, "brief_at": "7.30am"})
     assert mod._schedule_key("every 5 minutes") == mod._schedule_key("every 5m")
+
+
+def test_card_result_states_the_configured_timing(loaded):
+    # Seen with Sonnet on a 1m card_timeout: it told the user "about an hour" from the tool description.
+    _manager, plugin = loaded
+    low = plugin.module._card_timing("low", "1m")
+    assert "re-asked 1m" in low and "applied" in low
+    money = plugin.module._card_timing("money", "")
+    assert "re-asked 1h" in money and "never decided" in money and "applied" not in money

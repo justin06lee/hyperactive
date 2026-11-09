@@ -397,6 +397,14 @@ def _status_text(conn) -> str:
     return "\n".join(lines)
 
 
+def _card_timing(stakes: str, card_timeout: str) -> str:
+    """What happens to an unanswered card, in the configured timing, for the model to repeat."""
+    t = (card_timeout or pulse.DEFAULTS["card_timeout"]).strip()
+    if stakes == "low":
+        return f"re-asked {t} after it is sent; {t} after that the recommendation is applied"
+    return f"re-asked {t} after it is sent, then it waits for the user ({stakes} is never decided for them)"
+
+
 def _make_handlers(ctx):
     def scheduled(row: dict) -> dict:
         row["pulse"] = ensure_pulse(ctx)
@@ -420,6 +428,8 @@ def _make_handlers(ctx):
         row = scheduled(store.add_card(conn, a.get("question", ""), a.get("recommended", ""),
                                        options=a.get("options"), stakes=a.get("stakes", "low"),
                                        goal_id=a.get("goal_id"), action=a.get("action"), when=a.get("when", "now")))
+        # The tool description can only say "an hour"; tell the model the configured timing.
+        row["if_unanswered"] = _card_timing(row["stakes"], _settings(ctx)["card_timeout"])
         if row["stakes"] == "low" and not a.get("action"):
             row["note"] = ("No action attached: if the recommendation is applied, nothing changes but the "
                            "record. Ask again with an action if it should do something.")
