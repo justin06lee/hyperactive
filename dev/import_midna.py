@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
@@ -117,8 +118,12 @@ def snapshot(src: str, dest: str, group: str = "") -> None:
     d.close()
     s.close()
     if group:
-        shutil.chown(dest, group=group)
-        os.chmod(dest, 0o640)
+        try:
+            shutil.chown(dest, group=group)
+            os.chmod(dest, 0o640)
+        except PermissionError:
+            # not a member of that group (no root to add us): grant its same-named user read via an ACL
+            subprocess.run(["setfacl", "-m", f"u:{group}:r", dest], check=True)
 
 
 class Plan:
