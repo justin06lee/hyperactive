@@ -247,7 +247,7 @@ def test_import_dry_run_writes_nothing_then_apply_is_idempotent(tmp_path, midna,
     note_id = store.connect(target).execute("SELECT id FROM notes").fetchone()[0]
     assert f"note #{note_id}" in cron[1]["prompt"] and cron[1]["one_shot"]
     script = (out / "cron-plan.sh").read_text()
-    assert "--name midna:3" in script and "--repeat 1" in script
+    assert "--name midna:3" in script and "120 s" in script
 
     capsys.readouterr()
     assert run(["plan", midna, "--target", target, "--out", out]) == 0
