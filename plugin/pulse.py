@@ -24,7 +24,8 @@ try:
 except ImportError:  # loaded as a top-level module by the cron shim
     import store  # type: ignore[no-redef]
 
-DEFAULTS = {"quiet_hours": "", "card_timeout": "1h", "stale_after": "3d", "max_items": 5, "timezone": ""}
+DEFAULTS = {"quiet_hours": "", "card_timeout": "1h", "stale_after": "3d", "max_items": 5, "timezone": "",
+            "quiet_sources": ""}
 STAKES_REASON = {"money": "It involves money", "public": "It's public",
                  "irreversible": "It can't be undone"}
 
@@ -83,6 +84,17 @@ def _card_text(card: dict, step: str, timeout: timedelta, result: str = "") -> s
             f"Reply {either(card['options'])} when you're ready.")
 
 
+def quiet_source(cfg: dict):
+    """Rows imported from a system that still delivers them itself (ext_ref 'oldapp:...' with
+    quiet_sources 'oldapp') are tracked but never sent by the pulse, so nothing arrives twice."""
+    sources = {s.strip() for s in str(cfg.get("quiet_sources") or "").split(",") if s.strip()}
+
+    def muted(row) -> bool:
+        ref = row["ext_ref"] if "ext_ref" in row.keys() else None
+        return bool(ref) and ref.split(":", 1)[0] in sources
+    return muted
+
+
 def run(data_dir: Path, at: datetime | None = None) -> str:
     at = at or store.now()
     cfg = load_settings(data_dir)
@@ -91,6 +103,7 @@ def run(data_dir: Path, at: datetime | None = None) -> str:
     timeout = store.parse_duration(cfg["card_timeout"])
     stale_after = store.parse_duration(cfg["stale_after"])
     cap = max(1, int(cfg["max_items"]))
+    muted = quiet_source(cfg)
     stamp = store.iso(at)
     conn = store.connect(data_dir / "hyperactive.db")
     out: list[str] = []
@@ -123,7 +136,7 @@ def run(data_dir: Path, at: datetime | None = None) -> str:
         for c in store.commitments(conn):
             if len(out) >= cap:
                 break
-            if not c["due_at"] or c["notified_at"] or store.parse_iso(c["due_at"]) > at:
+            if not c["due_at"] or c["notified_at"] or store.parse_iso(c["due_at"]) > at or muted(c):
                 continue
             due = store.local_time(c["due_at"], at=at)
             text = (f"You owe {c['person']}: {c['what']} (due {due}). Done already? Just tell me."
@@ -137,6 +150,8 @@ def run(data_dir: Path, at: datetime | None = None) -> str:
                               "AND review_at<=? AND notified_at IS NULL ORDER BY review_at", (stamp,)).fetchall():
             if len(out) >= cap:
                 break
+            if muted(d):
+                continue
             why = f" because {d['rationale']}" if d["rationale"] else ""
             made = store.local_time(d["created_at"], at=at)
             text = (f"Review time. On {made} you decided \"{d['title']}\": {d['choice'] or '(no choice noted)'}{why}.\n"
@@ -150,17 +165,29 @@ def run(data_dir: Path, at: datetime | None = None) -> str:
                 break
             if store.parse_iso(f["due_at"]) > at:
                 break  # ordered by due_at
+            if muted(f):
+                continue
             conn.execute("UPDATE followups SET status='sent', sent_at=? WHERE id=?", (stamp, f["id"]))
             emit(f["kind"], f["goal_id"], f"followup:{f['id']}", f["text"])
 
         # 5. At most one stale goal per pulse: a nudge, not a nag.
-        for g in store.stale_goals(conn, at, stale_after)[:1]:
+        for g in [g for g in store.stale_goals(conn, at, stale_after) if not muted(g)][:1]:
             if len(out) >= cap:
                 break
             still = span(at - store.parse_iso(g["last_moved_at"]))
             conn.execute("UPDATE goals SET nudged_at=? WHERE id=?", (stamp, g["id"]))
             emit("stale", g["id"], f"goal:{g['id']}",
                  f"\"{g['title']}\" hasn't moved in {still}. Still on? Tell me the next step, or that it's done.")
+
+        # 6. Once a night (from 03:00 local), let unused memories fade. Not while mirroring another
+        #    system (quiet_sources): that system still runs its own maintenance.
+        here = store.local(at)
+        if not cfg["quiet_sources"] and here.hour >= 3 and conn.execute("SELECT 1 FROM memories WHERE archived_at IS NULL LIMIT 1").fetchone():
+            day_start = here.replace(hour=3, minute=0, second=0, microsecond=0)
+            if not conn.execute("SELECT 1 FROM events WHERE kind IN ('memory.fade','memory.fade-check') AND at>=?",
+                                (store.iso(day_start),)).fetchone():
+                if not store.fade_memories(conn, at):
+                    store.log(conn, "memory.fade-check", None, "0 faded", "", at=at)
 
         conn.commit()
         return "\n\n".join(out)
@@ -215,7 +242,7 @@ def explain(conn, event_id: int | None = None) -> str:
             return f"no event #{event_id}"
     blocks = []
     for e in rows:
-        chain = " < ".join(f"{g['title']} ({g['horizon']})" for g in store.goal_chain(conn, e["goal_id"]))
+        chain = " < ".join(f"{g['title']} ({store.horizon_of(g)})" for g in store.goal_chain(conn, e["goal_id"]))
         sent = (e["detail"] or "").splitlines()[0]
         blocks.append(f"{store.local_time(e['at'])} (event {e['id']})\n"
                       f"  sent: {sent[:90] + '...' if len(sent) > 90 else sent}\n"
@@ -249,6 +276,9 @@ def brief(data_dir: Path, at: datetime | None = None) -> str:
         sections.append(("Scheduled for today", [
             f"- {store.local_time(f['due_at'], at=at)} {f['kind']}: {f['text']} [{goal(f['goal_id'])}]"
             for f in store.pending_followups(conn) if store.parse_iso(f["due_at"]) <= end_of_day]))
+        sections.append(("Calendar today", [
+            f"- {store.event_text(e, at=at)}" for e in store.events_between(
+                conn, local.replace(hour=0, minute=0, second=0, microsecond=0), end_of_day)]))
         sections.append(("Promises due within a day or overdue", [
             f"- {store.commitment_text(c)}: "
             f"{'overdue since' if store.parse_iso(c['due_at']) <= at else 'due'} "
@@ -256,7 +286,7 @@ def brief(data_dir: Path, at: datetime | None = None) -> str:
         sections.append(("Decisions up for review", [
             f"- \"{d['title']}\": {d['choice']} [{goal(d['goal_id'])}]" for d in att["decisions"]]))
         sections.append(("Stalled goals", [
-            f"- #{g['id']} {g['title']} ({g['horizon']}): no movement since "
+            f"- #{g['id']} {g['title']} ({store.horizon_of(g)}): no movement since "
             f"{store.local_time(g['last_moved_at'], at=at)}"
             for g in store.stale_goals(conn, at, stale_after, include_nudged=True)[:3]]))
         week = conn.execute("SELECT * FROM goals WHERE status='active' AND horizon='week' "

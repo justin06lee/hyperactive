@@ -127,3 +127,16 @@ def test_card_result_states_the_configured_timing(loaded):
     assert "re-asked 1m" in low and "applied" in low
     money = plugin.module._card_timing("money", "")
     assert "re-asked 1h" in money and "never decided" in money and "applied" not in money
+
+
+def test_notes_and_calendar_tools_are_opt_in(loaded):
+    from tools.registry import registry
+    manager, _plugin = loaded
+    note = registry.get_entry("ha_note_save", scope=manager.scope_key)
+    assert note is not None and note.check_fn() is False  # registered, but hidden until enabled
+    home = Path(__import__("os").environ["HERMES_HOME"])
+    cfg = yaml.safe_load((home / "config.yaml").read_text())
+    cfg["plugins"]["entries"] = {"hyperactive": {"settings": {"features": "notes"}}}
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg))
+    assert note.check_fn() is True
+    assert registry.get_entry("ha_event_add", scope=manager.scope_key).check_fn() is False

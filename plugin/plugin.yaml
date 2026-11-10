@@ -1,5 +1,5 @@
 name: hyperactive
-version: 0.3.0
+version: 0.4.0
 manifest_version: 2
 api_version: 1
 description: "Hermes, but it texts you first. Keeps your goals (life > year > quarter > week), promises both ways and decisions, then speaks on its own schedule: check-ins, decision reviews, nudges on stalled goals, and tap cards that decide small things for you after two unanswered asks but never money, public or irreversible ones. Every message names the goal it serves."
@@ -14,6 +14,12 @@ provides_tools:
   - ha_commit
   - ha_decide
   - ha_status
+  - ha_note_save
+  - ha_note_read
+  - ha_note_search
+  - ha_event_add
+  - ha_event_list
+  - ha_event_update
 provides_hooks:
   - pre_llm_call
   - gateway_platform_event
@@ -26,3 +32,6 @@ config_schema:
   stale_after: {type: str, default: "3d", description: "A week goal with no movement for this long gets one nudge (quarter goals: 4x)."}
   brief_at: {type: str, default: "08:00", description: "Local time of the daily brief, an agent-mode cron job (one model call a day, skipped when there is nothing to brief). Empty turns it off."}
   max_items: {type: int, default: 5, description: "Most items in one proactive message; the rest wait for the next pulse."}
+  features: {type: str, default: "", description: "Opt-in tool groups, comma-separated: notes (ha_note_*), calendar (ha_event_*; the brief lists today's events). Empty = goals, cards, commitments and decisions only."}
+  memory_pinned_chars: {type: int, default: 12000, description: "Only with memory.provider hyperactive: most characters of pinned memories put in the system prompt."}
+  quiet_sources: {type: str, default: "", description: "Comma-separated import sources (ext_ref prefixes, e.g. oldapp) whose rows are tracked but never sent by the pulse, because the source system still sends them."}

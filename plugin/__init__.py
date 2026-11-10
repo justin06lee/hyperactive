@@ -33,7 +33,8 @@ BRIEF_SCRIPT = "hyperactive_brief.py"
 BRIEF_SKILL = f"{PLUGIN}:brief"
 BRIEF_PROMPT = ("Write the user's daily brief from the hyperactive data above, following the "
                 f"{BRIEF_SKILL} skill. Use only that data.")
-PULSE_SETTINGS = ("quiet_hours", "card_timeout", "stale_after", "max_items")
+PULSE_SETTINGS = ("quiet_hours", "card_timeout", "stale_after", "max_items", "quiet_sources")
+FEATURES = ("notes", "calendar")  # opt-in tool groups: plugin setting `features: notes,calendar`
 _HERE = Path(__file__).resolve().parent
 
 _SHIM = '''# Installed by the hyperactive Hermes plugin. Re-created by `hermes hyperactive setup`.
@@ -371,7 +372,81 @@ STATUS = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+NOTE_SAVE = {
+    "name": "ha_note_save",
+    "description": ("Save a note for the user (longer text worth keeping: plans, lists, drafts, research). "
+                    "To edit one, pass note_id with the fields to replace."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "body": {"type": "string", "description": "Markdown."},
+            "tags": {"type": "string", "description": "Optional comma-separated tags."},
+            "note_id": {"type": "integer", "description": "To replace an existing note's fields."},
+        },
+    },
+}
+
+NOTE_READ = {
+    "name": "ha_note_read",
+    "description": "Read one of the user's notes in full, by id (ids come from ha_note_search).",
+    "parameters": {"type": "object", "properties": {"note_id": {"type": "integer"}}, "required": ["note_id"]},
+}
+
+NOTE_SEARCH = {
+    "name": "ha_note_search",
+    "description": "Search the user's notes (full text), or list the most recent ones with no query.",
+    "parameters": {"type": "object", "properties": {
+        "query": {"type": "string"}, "limit": {"type": "integer", "description": "Default 10."}}},
+}
+
+EVENT_ADD = {
+    "name": "ha_event_add",
+    "description": ("Put an event on the user's calendar (kept by hyperactive; not synced to another calendar). "
+                    "The daily brief lists today's events."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "starts": {"type": "string", "description": "ISO time (local if no zone), 'tomorrow 15:00', or a date "
+                                                       "YYYY-MM-DD with all_day."},
+            "ends": {"type": "string", "description": "Optional, same formats."},
+            "all_day": {"type": "boolean"},
+            "location": {"type": "string"},
+            "notes": {"type": "string"},
+            "status": {"type": "string", "enum": list(store.EVENT_STATUSES), "description": "Default confirmed."},
+            "goal_id": {"type": "integer", "description": "Optional goal it serves."},
+        },
+        "required": ["title", "starts"],
+    },
+}
+
+EVENT_LIST = {
+    "name": "ha_event_list",
+    "description": "List calendar events in a window (default: the next 7 days).",
+    "parameters": {"type": "object", "properties": {
+        "start": {"type": "string", "description": "Default now. ISO or 'tomorrow 00:00'."},
+        "days": {"type": "integer", "description": "Window length in days, default 7."},
+        "include_cancelled": {"type": "boolean"}}},
+}
+
+EVENT_UPDATE = {
+    "name": "ha_event_update",
+    "description": "Change a calendar event: move it (starts/ends), rename, or set status cancelled/tentative.",
+    "parameters": {"type": "object", "properties": {
+        "event_id": {"type": "integer"}, "title": {"type": "string"}, "starts": {"type": "string"},
+        "ends": {"type": "string"}, "location": {"type": "string"}, "notes": {"type": "string"},
+        "status": {"type": "string", "enum": list(store.EVENT_STATUSES)}}, "required": ["event_id"]},
+}
+
 TOOLS = (GOAL_ADD, FOLLOWUP, CARD, COMMIT, DECIDE, STATUS)
+FEATURE_TOOLS = {"notes": (NOTE_SAVE, NOTE_READ, NOTE_SEARCH), "calendar": (EVENT_ADD, EVENT_LIST, EVENT_UPDATE)}
+
+
+def _features(ctx) -> set[str]:
+    raw = ctx.get_config("features", default="") or ""
+    items = raw if isinstance(raw, list) else str(raw).split(",")
+    return {str(f).strip() for f in items if str(f).strip() in FEATURES}
 
 
 def _status_text(conn) -> str:
@@ -453,8 +528,40 @@ def _make_handlers(ctx):
     def status(conn, _a):
         return {"status": _status_text(conn)}
 
+    def note_save(conn, a):
+        return store.save_note(conn, a.get("title", ""), a.get("body", ""), a.get("tags", ""), a.get("note_id"))
+
+    def note_read(conn, a):
+        note = store.get_note(conn, int(a.get("note_id") or 0))
+        if note is None:
+            raise store.StoreError(f"no note #{a.get('note_id')}")
+        return {"note": {k: note[k] for k in ("id", "title", "body", "tags")},
+                "updated": store.local_time(note["updated_at"])}
+
+    def note_search(conn, a):
+        return {"notes": store.search_notes(conn, a.get("query", ""), int(a.get("limit") or 10))}
+
+    def event_add(conn, a):
+        return store.add_event(conn, a.get("title", ""), a.get("starts", ""), a.get("ends"),
+                               all_day=bool(a.get("all_day")), location=a.get("location", ""),
+                               notes=a.get("notes", ""), status=a.get("status") or "confirmed",
+                               goal_id=a.get("goal_id"))
+
+    def event_list(conn, a):
+        start = store.parse_when(a.get("start") or "now")
+        days = int(a.get("days") or 7)
+        rows = store.events_between(conn, start, start + store.timedelta(days=days),
+                                    include_cancelled=bool(a.get("include_cancelled")))
+        return {"events": [store.event_text(e) for e in rows] or ["(nothing)"]}
+
+    def event_update(conn, a):
+        return store.update_event(conn, int(a.get("event_id") or 0), **{k: a.get(k) for k in (
+            "title", "starts", "ends", "location", "notes", "status")})
+
     return {"ha_goal_add": goal_add, "ha_followup": followup, "ha_card": card, "ha_commit": commit,
-            "ha_decide": decide, "ha_status": status}
+            "ha_decide": decide, "ha_status": status, "ha_note_save": note_save, "ha_note_read": note_read,
+            "ha_note_search": note_search, "ha_event_add": event_add, "ha_event_list": event_list,
+            "ha_event_update": event_update}
 
 
 # --- slash + CLI commands ----------------------------------------------------------------------
@@ -556,6 +663,8 @@ def _system_prompt_section(_info) -> str:
 
 def _attention_lines(conn, at) -> list[str]:
     att = store.attention(conn, at)
+    muted = pulse.quiet_source(pulse.load_settings(_data_dir()))  # the source system raises those itself
+    att = {k: [r for r in rows if not muted(r)] for k, rows in att.items()}
     lines = [f"- card {c['id']} awaits an answer: {c['question']} ({' / '.join(c['options'])}; "
              f"recommended {c['recommended']}, {c['stakes']} stakes)" for c in att["cards"][:3]]
     for c in att["commitments"][:3]:
@@ -643,11 +752,34 @@ def on_platform_event(platform="", event_type="", payload=None, **_kw):
 
 # --- registration ------------------------------------------------------------------------------
 
+def _memory_provider(ctx):
+    """The opt-in memory provider. Inert unless config.yaml has `memory.provider: hyperactive`."""
+    try:
+        from .memory import HyperactiveMemory
+    except Exception:  # a Hermes without the memory-provider API
+        logger.debug("hyperactive: memory provider unavailable", exc_info=True)
+        return None
+    chars = ctx.get_config("memory_pinned_chars", default=None) if hasattr(ctx, "get_config") else None
+    return HyperactiveMemory(int(chars)) if chars else HyperactiveMemory()
+
+
 def register(ctx):
     store.set_timezone(_hermes_timezone())
+    provider = _memory_provider(ctx)
+    if provider is not None and hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(provider)
+        # Hermes's memory loader calls register() with a collector that only wants the provider;
+        # the general plugin load (a real PluginContext, no `provider` attribute) registers the rest.
+        if getattr(ctx, "provider", None) is provider:
+            return
     handlers = _make_handlers(ctx)
     for schema in TOOLS:
         ctx.register_tool(name=schema["name"], toolset=PLUGIN, schema=schema, handler=_tool(handlers[schema["name"]]))
+    for feature, schemas in FEATURE_TOOLS.items():
+        for schema in schemas:
+            ctx.register_tool(name=schema["name"], toolset=PLUGIN, schema=schema,
+                              handler=_tool(handlers[schema["name"]]),
+                              check_fn=lambda feature=feature: feature in _features(ctx))
 
     def command(raw):
         return _command(ctx, handlers, raw)

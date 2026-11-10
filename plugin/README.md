@@ -48,6 +48,14 @@ schedules its own check-ins. A gateway (`hermes gateway`) has to be running for 
 | `ha_decide` | Records a decision, its rationale and a review date. |
 | `ha_status` | Shows the tree and everything tracked or scheduled. |
 
+Opt-in extras (all in the same SQLite file; nothing changes unless you turn them on):
+
+| Turn on with | Adds |
+|------|------|
+| setting `features: notes` | `ha_note_save`, `ha_note_read`, `ha_note_search`: notes with full-text search. |
+| setting `features: calendar` | `ha_event_add`, `ha_event_list`, `ha_event_update`: a local calendar (no sync). The daily brief lists today's events. |
+| Hermes `memory.provider: hyperactive` | Long-term memory instead of Hermes's flat memory files: kinds, importance 1–10, pins, supersede chains and full-text recall. Pinned memories go in the system prompt, and the best matches for each message are recalled. `ha_remember` and `ha_recall` are the tools. Writes made with Hermes's own memory tool are copied in, and unused memories fade nightly. |
+
 `/ha` (also available as `hermes hyperactive …`):
 
 ```
@@ -99,6 +107,9 @@ schedules its own check-ins. A gateway (`hermes gateway`) has to be running for 
 | `stale_after` | `3d` | Stillness before a week goal gets a nudge. |
 | `max_items` | `5` | Most items in one message. |
 | `brief_at` | `08:00` | Local time of the daily brief. Empty turns it off. |
+| `features` | empty | `notes`, `calendar`, or both, comma-separated. |
+| `memory_pinned_chars` | `12000` | With the memory provider: most characters of pinned memories in the prompt. |
+| `quiet_sources` | empty | For imports: rows from these sources (the `ext_ref` prefix an importer set) are kept but never sent by the pulse, because the old system still sends them. |
 
 Local times follow Hermes's `timezone` setting (or `HERMES_TIMEZONE`), else the machine's.
 
