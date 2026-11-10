@@ -285,7 +285,9 @@ GOAL_ADD = {
 FOLLOWUP = {
     "name": "ha_followup",
     "description": ("Schedule something to say to the user on your own later: a follow-up, reminder or nudge. "
-                    "Delivered even if the user never messages again. Quiet hours defer it, never drop it."),
+                    "Delivered even if the user never messages again. Quiet hours defer it, never drop it. It needs "
+                    "no model call, so prefer it (kind reminder) for anything that must arrive on time: if Hermes is "
+                    "down at that moment it is sent late, never lost."),
     "parameters": {
         "type": "object",
         "properties": {

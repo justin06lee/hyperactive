@@ -64,8 +64,10 @@ WAKEUP_PREAMBLE = ("[Wakeup: the user did not send this; you are running on your
                    "wakeup #{id}).] ")
 WAKEUP_TAIL = (" Your final reply is delivered to the user; reply with exactly [SILENT] if there is nothing "
                "worth sending. Act with your tools and update your records. (Written for midna's tools: "
-               "message_user/ask_user = your final reply or an ha_card; schedule_wakeup = ha_followup or a cron "
-               "job; history_search = session_search for new chats, midna-body history_search for older ones; "
+               "message_user/ask_user = your final reply or an ha_card; schedule_wakeup = ha_followup (kind "
+               "reminder) for anything that must arrive on time, since it needs no model and is delivered late "
+               "rather than lost if the gateway is down, or a one-shot cron job only when the moment needs "
+               "thinking; history_search = session_search for new chats, midna-body history_search for older ones; "
                "recall/remember = ha_recall/ha_remember; notes and tasks are in hyperactive.)")
 # midna ids inside wakeup text ("note #5") -> the imported hyperactive row's id
 ID_MENTION = re.compile(r"\b(note|task|goal|decision|commitment|fact)(\s*#)(\d+)", re.I)
@@ -128,6 +130,7 @@ class Plan:
         self.skip_rows: list[dict] = []
         self.warnings: list[str] = []
         self.cron: list[dict] = []
+        self.closed: dict[str, str] = {}  # ext_ref -> status, for imported rows midna has since closed
 
     def add(self, table, ext_ref, values, refs=None, source=None):
         self.items.append({"table": table, "ext_ref": ext_ref, "values": values, "refs": refs or {},
@@ -258,6 +261,8 @@ def build(src: sqlite3.Connection, tz: str) -> Plan:
         due_local = datetime.fromtimestamp(w["due_at"] / 1000, tz=zone)
         if w["status"] not in ("pending", "running"):
             p.skip("wakeups", w["id"], f"{w['status']} (history)")
+            if w["kind"] == "reminder" and not w["cron"]:  # sent or cancelled since an earlier import
+                p.closed[ref("wakeups", w["id"])] = "sent" if w["status"] == "done" else "cancelled"
             continue
         if w["kind"] == "reminder" and not w["cron"]:
             p.add("followups", ref("wakeups", w["id"]), {
@@ -302,6 +307,7 @@ def build(src: sqlite3.Connection, tz: str) -> Plan:
 
 # --- write hyperactive -------------------------------------------------------------------------
 
+IMPORT_TABLES = list(store.COLUMNS_V3) + ["notes", "calendar"]  # the tables with ext_ref
 COMPARE_SKIP = {"last_used_at", "use_count"}  # recall touches these on both sides; not a content change
 
 
@@ -375,6 +381,15 @@ def sync(conn: sqlite3.Connection, plan: Plan) -> dict:
             counts[table]["orphan_ref"] += 1
             continue
         conn.execute(f"UPDATE {table} SET {col}=? WHERE ext_ref=?", (rid, ext))
+
+    # Reminders midna delivered (or cancelled) since the last run: close them here too, or the pulse
+    # would send them again once mirroring ends.
+    for ext, status in plan.closed.items():
+        cur = conn.execute("UPDATE followups SET status=?, sent_at=COALESCE(sent_at, ?) WHERE ext_ref=? "
+                           "AND status='pending'", (status, store.iso(store.now()), ext))
+        if cur.rowcount:
+            counts["followups"]["closed"] += 1
+            diffs.append(f"{ext} followups.status: 'pending' -> {status!r} (closed in midna)")
     return {"counts": {t: dict(c) for t, c in counts.items()}, "diffs": diffs}
 
 
@@ -400,11 +415,19 @@ def check(conn: sqlite3.Connection, plan: Plan) -> list[str]:
         problems.append(f"integrity_check: {ok}")
     for row in conn.execute("PRAGMA foreign_key_check"):
         problems.append(f"foreign key: {tuple(row)}")
-    want = Counter(i["table"] for i in plan.items if i["table"] != "memory_links")
-    for table, n in want.items():
-        have = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE ext_ref LIKE ?", (f"{SRC}:%",)).fetchone()[0]
-        if have != n:
-            problems.append(f"{table}: planned {n} imported rows, found {have}")
+    want: dict[str, list[str]] = defaultdict(list)
+    for i in plan.items:
+        if i["table"] != "memory_links":
+            want[i["table"]].append(i["ext_ref"])
+    for table in IMPORT_TABLES:
+        refs = want.get(table, [])
+        have = {r[0] for r in conn.execute(f"SELECT ext_ref FROM {table} WHERE ext_ref LIKE ?", (f"{SRC}:%",))}
+        missing = [r for r in refs if r not in have]
+        if missing:
+            problems.append(f"{table}: {len(missing)} planned rows missing, e.g. {missing[0]}")
+        gone = len(have - set(refs))
+        if gone:  # imported by an earlier run, no longer in midna (deleted, or a reminder now closed): kept
+            plan.warnings.append(f"{table}: {gone} rows imported earlier are no longer in midna's live set; kept")
     return problems
 
 
@@ -511,7 +534,7 @@ def undo(args) -> int:
     if args.apply:
         guard_target(target, args.live)
     conn = store.connect(target) if args.apply else sqlite3.connect(f"file:{target.resolve()}?mode=ro", uri=True)
-    tables = list(store.COLUMNS_V3) + ["notes", "calendar"]
+    tables = IMPORT_TABLES
     like = f"{SRC}:%"
     counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE ext_ref LIKE ?", (like,)).fetchone()[0] for t in tables}
     links = conn.execute("SELECT COUNT(*) FROM memory_links WHERE memory_id IN "
