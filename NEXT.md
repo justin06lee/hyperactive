@@ -43,7 +43,7 @@ should be open by Mon night**.
    - one forced brief run (`hermes cron run <brief id>` + `hermes cron tick`) to judge the prose
      and the skill. Tune `plugin/skills/brief/SKILL.md` from it;
    - then refresh the screenshots if the real wording differs (`dev/media.json`).
-2. **Push + pin + PR** (midna, after Justin OKs): push to `justin06lee/hyperactive`, then
+2. **DONE Nov 9 11:20 KST:** repo https://github.com/justin06lee/hyperactive (pinned 2f147d3; pin commit fd280a3), PR https://github.com/NousResearch/hermes-agent/pull/151607. ~~Push + pin + PR~~ (midna, after Justin OKs): push to `justin06lee/hyperactive`, then
    `catalog/pin.sh <sha>`, re-run `validate_plugin_catalog.py`, and open the PR with
    `catalog/PR.md`. If the history is rewritten before the push, pin the sha that was pushed.
 3. **Telegram on a test bot** (needs a test bot token; never the live `hermes` user's bot):

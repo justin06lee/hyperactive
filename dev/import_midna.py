@@ -115,6 +115,7 @@ def snapshot(src: str, dest: str, group: str = "") -> None:
     d = sqlite3.connect(dest)
     os.chmod(dest, 0o600)
     s.backup(d)
+    d.execute("PRAGMA journal_mode=DELETE")  # a WAL copy needs -shm/-wal files the reader can't create
     d.close()
     s.close()
     if group:
