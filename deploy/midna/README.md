@@ -10,6 +10,8 @@ installer (`midna install`) can vendor this directory and call it unchanged.
 | `oneshot_sweep.py` | hermes, as 2 no-agent cron jobs | ledger of pending one-shots (every 10m); nightly re-creation of one-shots Hermes dropped while its gateway was down |
 | `jobwatch.py` | hermes, as the `midna-jobwatch` cron job's pre-run script | wakes the agent when a registered background job's result file appears |
 | `skills/midna-jobs/SKILL.md` | — | tells the agent to register long jobs and to use `ha_followup` for anything time-critical |
+| `persona/SOUL.md` | — | the midna persona, installed as Hermes's `SOUL.md` |
+| `midna_body.py` | midna, as the `midna-body.service` user unit | the midna-body MCP server (P2): his Mac over Tailscale ssh, and search over midna's chat archive |
 
 ## Commands
 
@@ -20,7 +22,13 @@ python3 -I deploy/midna/midna_hermes.py activate     # P3 writer flip
 python3 -I deploy/midna/midna_hermes.py deactivate   # P3 rollback
 python3 -I deploy/midna/midna_hermes.py uninstall    # P1 rollback
 python3 -I deploy/midna/midna_hermes.py status
+python3 -I deploy/midna/midna_hermes.py backup       # timestamped copy of Hermes's config/SOUL/.env/hyperactive.db
 ```
+
+**Rollback of one step** is re-running `install` with that step's toggle off (saved, so later
+runs keep it off): `--persona false` (pre-midna SOUL.md back), `--body false` (P2: the
+`mcp_servers` entry, the token and the service go), `--api-server false`. Turning it back on is
+the same with `true`. A gateway restart happens only if something changed.
 
 `install` takes every setting as an option (`--hermes-home`, `--midna-db`, `--ref`, `--deliver`,
 `--mirror-at`, ...; see `DEFAULTS` in `midna_hermes.py`) and saves them; the other commands read
@@ -44,7 +52,23 @@ them back. The defaults are the live Jetson layout.
 6. Mirror import (below).
 7. Writes and enables `midna-hermes-mirror.{service,timer}` (midna's systemd user units, 03:40 Asia/Seoul,
    `Persistent=true`).
-8. Restarts the gateway only if the plugin, config or skill changed.
+8. Restarts the gateway only if the plugin, config, skill, SOUL or .env changed.
+
+Also, on every run (each one a toggle, default on):
+- **Backup first:** `~hermes/.hermes/backups/midna/<stamp>/` gets `config.yaml`, `SOUL.md`, `env`
+  (the `.env`) and `hyperactive.db`; the 20 newest are kept. `backups/pre-midna/` stays the P1 rollback point.
+- **Persona:** `SOUL.md` = `persona/SOUL.md` (voice and values only; facts come from the memory provider's pinned memories).
+- **midna-body (P2):** midna's user unit `midna-body.service` serves MCP on `127.0.0.1:8791/mcp`
+  (bearer token in `~/.local/state/midna-hermes/midna-body.token`, mode 600; restarted when the code
+  sha or unit changes). Hermes gets `MIDNA_BODY_TOKEN` in its `.env` and
+  `mcp_servers.midna-body: {url, headers.Authorization: "Bearer ${MIDNA_BODY_TOKEN}", trust: untrusted, timeout: 600}`.
+  `untrusted` means Hermes asks Justin (approval buttons) before any tool without `readOnlyHint`:
+  `device_shell`, `device_write_file`, `device_applescript`, `device_clipboard_write`. Status, list, read,
+  screenshot, clipboard read and the archive tools run on their own (rec 3). Every device call is logged
+  to `~/.local/state/midna-hermes/midna-body.jsonl`.
+- **api_server:** `API_SERVER_ENABLED/HOST/PORT/KEY` in Hermes's `.env` (127.0.0.1:8642). The key lives
+  in midna's secrets (`~/.local/share/midna/secrets/hermes_api_server_key`), which is what P4's brain
+  adapter in `midna serve` will use.
 
 ### mirror (P1 nightly)
 - Snapshot of midna.db through the backup API (read-only) into a private temp dir, group-readable by `hermes`.
@@ -96,3 +120,37 @@ them back. The defaults are the live Jetson layout.
   `jobwatch.py add <file> --note ...`.
 - `midna-jobwatch` then wakes the agent within about 2 minutes of the file settling. Each job is reported once.
 - A job with no result after 7 days is reported once as overdue.
+
+## midna-body tools
+| tool | approval | what |
+|---|---|---|
+| `device_status` | no | name, macOS, uptime, battery, frontmost app, idle seconds |
+| `device_list`, `device_read_file` | no | `ls -la`; first `max_bytes` of a file |
+| `device_screenshot` | no | `screencapture` + `sips` resize, returned as an image |
+| `device_clipboard_read` | no | `pbpaste` |
+| `device_shell` | yes | zsh login shell, command sent base64 on stdin, timeout ≤ 570 s |
+| `device_write_file`, `device_applescript`, `device_clipboard_write` | yes | |
+| `history_search` | no | FTS5 over midna.db `messages` (read-only), role/since/until filters, snippets with ids |
+| `history_read` | no | a message with its neighbours in the same conversation |
+
+Local check without Hermes: `python3 -I deploy/midna/midna_body.py call history_search '{"query":"fajr"}'`.
+
+## What the midna repo's `midna install` must call
+The end state ships from the midna repo (Justin, Nov 10). This directory is written to be vendored
+there unchanged (e.g. as `vendor/hyperactive` at a pinned sha); `midna install` then needs only:
+
+1. Prerequisites it already owns: the `midna` user with `midna.db`, ssh access to the Mac (key in
+   `~midna/.ssh`, host in `--mac`), Hermes installed for the `hermes` user with its gateway unit, the
+   hermes-patch bridge, and `sudo -n -u hermes` allowed for `midna`.
+2. `python3 -I <vendor>/deploy/midna/midna_hermes.py install --repo <vendor> --ref <pinned sha> [--mac user@host]`.
+   This is everything P1 + persona + P2 + api_server, idempotent, and safe to re-run on every `midna install`/update.
+3. At the writer flip (P3), once: `midna_hermes.py activate`. `midna install` must not run it on its own;
+   it should read `~/.local/state/midna-hermes/state.json` and keep whatever phase is recorded (install already does this).
+4. P4 (not built yet): `midna model hermes` points `midna serve` at `http://127.0.0.1:<api_port>/v1/responses`
+   with the key from `hermes_api_server_key`.
+5. `midna restore`: restoring `midna.db` then re-running `install` re-mirrors it while phase is `mirror`. After
+   activation, Hermes's own data is the source of truth: restore `~hermes/.hermes/backups/midna/<stamp>/`
+   (config, SOUL, env, hyperactive.db) and restart the gateway.
+
+Hand steps that remain: none for P1/P2 on this Jetson. On a fresh machine, the Mac side (Tailscale, the
+ssh key in `authorized_keys`, Remote Login on) is the only thing outside the installer.

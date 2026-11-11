@@ -282,6 +282,66 @@ def backup(cfg: dict) -> str:
     return hermes_side(cfg, "backup", {"keep": cfg["backups_keep"]}).get("dir", "?")
 
 
+def _http(url: str, *, data: dict | None = None, token: str = "", timeout: float = 10) -> tuple[int, dict | str]:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, json.dumps(data).encode() if data is not None else None,
+                                 headers={"Content-Type": "application/json",
+                                          **({"Authorization": f"Bearer {token}"} if token else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode()
+            code = r.status
+    except urllib.error.HTTPError as e:
+        raw, code = e.read().decode(errors="replace"), e.code
+    except OSError as e:
+        return 0, str(e)
+    try:
+        return code, json.loads(raw)
+    except ValueError:
+        return code, raw
+
+
+def cmd_check(cfg: dict, args) -> int:
+    """Is the live setup healthy? Gateway unit active, api_server /health, midna-body health and
+    `hermes mcp test midna-body`; with --turn, one real agent turn through /v1/responses (local
+    only: the reply comes back here, nothing is sent to Telegram)."""
+    bad = []
+    r = hermes_run(cfg, ["systemctl", "--user", "is-active", "hermes-gateway.service"], check=False)
+    log(f"- gateway: {r.stdout.strip() or r.stderr.strip()}")
+    if r.stdout.strip() != "active":
+        bad.append("gateway")
+    if cfg["api_server"]:
+        code, body = _http(f"http://127.0.0.1:{cfg['api_port']}/health")
+        log(f"- api_server /health: {code} {body}")
+        if code != 200:
+            bad.append("api_server")
+    if cfg["body"]:
+        ok = body_health(cfg, 3)
+        log(f"- midna-body /health: {'ok' if ok else 'NOT ok'}")
+        r = hermes_run(cfg, [cfg["hermes_bin"], "mcp", "test", BODY], check=False)
+        out = (r.stdout + r.stderr).strip()
+        log("- hermes mcp test midna-body:\n    " + "\n    ".join(out.splitlines()[-12:]))
+        if not ok or r.returncode != 0:
+            bad.append("midna-body")
+    if args.turn and cfg["api_server"]:
+        code, body = _http(f"http://127.0.0.1:{cfg['api_port']}/v1/responses", token=api_key(cfg), timeout=600,
+                           data={"model": "hermes-agent", "input": args.turn, "store": False})
+        text, tools = "", []
+        if isinstance(body, dict):
+            for item in body.get("output", []):
+                if item.get("type") == "function_call":
+                    tools.append(item.get("name"))
+                if item.get("type") == "message":
+                    text += "".join(c.get("text", "") for c in item.get("content", []))
+        log(f"- test turn: HTTP {code}, status {body.get('status') if isinstance(body, dict) else '?'}, "
+            f"tools {tools}\n    reply: {(text or str(body))[:1500]}")
+        if code != 200 or not text:
+            bad.append("turn")
+    log("ok" if not bad else f"NOT ok: {', '.join(bad)}")
+    return 1 if bad else 0
+
+
 def cmd_backup(cfg: dict, args) -> int:
     log(f"backup: {backup(cfg)}")
     return 0
@@ -625,7 +685,9 @@ class HermesSide:
     def env_set(self, key: str, value: str | None) -> None:
         """KEY=value in <HERMES_HOME>/.env; None removes the line."""
         f = self.home / ".env"
-        lines = f.read_text().splitlines() if f.exists() else []
+        lines = [ln for ln in f.read_text().splitlines()] if f.exists() else []
+        while lines and not lines[-1].strip():
+            lines.pop()
         kept = [ln for ln in lines if not re.match(rf"\s*(export\s+)?{re.escape(key)}=", ln)]
         new = kept + ([f"{key}={value}"] if value is not None else [])
         if new == lines:
@@ -633,7 +695,7 @@ class HermesSide:
         tmp = f.with_name(".env.midna-new")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            fh.write("\n".join(new) + "\n")
+            fh.write("".join(ln + "\n" for ln in new))
         os.replace(tmp, f)
         self.changed = True
         self.say(f".env {key} {'set' if value is not None else 'removed'}")
@@ -1048,7 +1110,8 @@ def main(argv=None) -> int:
     if argv[:1] == ["hermes-side"]:
         return hermes_side_main(argv[1])
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", choices=("install", "mirror", "activate", "deactivate", "uninstall", "status", "backup"))
+    ap.add_argument("command", choices=("install", "mirror", "activate", "deactivate", "uninstall", "status", "backup", "check"))
+    ap.add_argument("--turn", help="check: also run one agent turn with this input through the api_server")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG))
     ap.add_argument("--no-gateway-restart", action="store_true")
     for key, default in DEFAULTS.items():  # install saves these; the other commands may override them once
@@ -1064,7 +1127,7 @@ def main(argv=None) -> int:
         mirror(cfg)
         return 0
     return {"install": cmd_install, "activate": cmd_activate, "deactivate": cmd_deactivate,
-            "uninstall": cmd_uninstall, "status": cmd_status, "backup": cmd_backup}[args.command](cfg, args)
+            "uninstall": cmd_uninstall, "status": cmd_status, "backup": cmd_backup, "check": cmd_check}[args.command](cfg, args)
 
 
 if __name__ == "__main__":
