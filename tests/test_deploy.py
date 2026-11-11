@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import import_midna  # noqa: E402
 import jobwatch  # noqa: E402
+import midna_body  # noqa: E402
 import midna_hermes  # noqa: E402
 import oneshot_sweep  # noqa: E402
 import store  # noqa: E402
@@ -309,7 +310,7 @@ def test_installer_end_to_end(tmp_path, midna):
         "--hermes-python", sys.executable, "--hermes-group", "", "--midna-db", str(midna),
         "--local-home", str(tmp_path / "local"), "--state-dir", str(tmp_path / "state"),
         "--unit-dir", str(tmp_path / "units"), "--systemctl", "false", "--deliver", "local",
-        "--ref", head, "--rollback-plugin", pin)
+        "--ref", head, "--rollback-plugin", pin, "--api-key-file", str(tmp_path / "secrets/api_key"))
 
     def jobs():
         return {j["name"]: j for j in oneshot_sweep.cron_jobs(home)}
@@ -325,10 +326,28 @@ def test_installer_end_to_end(tmp_path, midna):
     assert "timezone: America/Los_Angeles" in (home / "backups/pre-midna/config.yaml").read_text()
     db = home / "plugin-data/hyperactive/hyperactive.db"
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM goals WHERE ext_ref LIKE 'midna:%'").fetchone()[0] == 3
+    # persona, body (P2) and api_server
+    assert (home / "SOUL.md").read_text() == (ROOT / "deploy/midna/persona/SOUL.md").read_text()
+    assert get("mcp_servers.midna-body.url") == "http://127.0.0.1:8791/mcp" and get("mcp_servers.midna-body.trust") == "untrusted"
+    dotenv = (home / ".env").read_text()
+    token = (tmp_path / "state/midna-body.token").read_text().strip()
+    assert f"MIDNA_BODY_TOKEN={token}" in dotenv and "API_SERVER_ENABLED=true" in dotenv and "API_SERVER_HOST=127.0.0.1" in dotenv
+    assert "serve --port 8791" in (tmp_path / "units/midna-body.service").read_text()
+    assert len(list((home / "backups/midna").iterdir())) == 1
     before = {n: j["id"] for n, j in jobs().items()}
+    snap = {f: (home / f).read_text() for f in ("config.yaml", ".env", "SOUL.md")}
 
     run("install")  # again: nothing changes
     assert {n: j["id"] for n, j in jobs().items()} == before
+    assert {f: (home / f).read_text() for f in snap} == snap
+    assert len(list((home / "backups/midna").iterdir())) == 2  # a backup per install
+
+    run("install", "--persona", "false", "--body", "false", "--api-server", "false")  # each step's rollback
+    assert (home / "SOUL.md").read_text() == "before\n" and get("mcp_servers.midna-body.url") in ("", "None")
+    assert "MIDNA_BODY_TOKEN" not in (home / ".env").read_text() and "API_SERVER" not in (home / ".env").read_text()
+    assert not (tmp_path / "units/midna-body.service").exists()
+    run("install", "--persona", "true", "--body", "true", "--api-server", "true")
+    assert {f: (home / f).read_text() for f in snap} == snap
     run("mirror")
 
     run("activate")
@@ -347,5 +366,113 @@ def test_installer_end_to_end(tmp_path, midna):
     run("uninstall")
     assert "version: 0.3.0" in (home / "plugins/hyperactive/plugin.yaml").read_text()
     assert "timezone: America/Los_Angeles" in (home / "config.yaml").read_text()
+    assert (home / "SOUL.md").read_text() == "before\n" and "midna-body" not in (home / "config.yaml").read_text()
+    assert "API_SERVER" not in (home / ".env").read_text() and not (tmp_path / "units/midna-body.service").exists()
     assert not [n for n in jobs() if n.startswith("midna")]
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM goals WHERE ext_ref LIKE 'midna:%'").fetchone()[0] == 0
+
+
+# --- midna-body (P2) -----------------------------------------------------------------------------
+
+@pytest.fixture
+def body(tmp_path, monkeypatch):
+    """midna-body on a free port with a small archive and a fake Mac (the ssh call is replaced)."""
+    import threading
+    from http.server import ThreadingHTTPServer
+    db = tmp_path / "midna.db"
+    c = sqlite3.connect(db)
+    c.executescript("""
+        CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id TEXT, role TEXT, text TEXT, created_at INTEGER);
+        CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
+        INSERT INTO messages VALUES (1, 'c1', 'user', 'what about the halal check for the job list', 1761000000000);
+        INSERT INTO messages VALUES (2, 'c1', 'midna', 'Each company gets a halal check and a fit score', 1761000060000);
+        INSERT INTO messages VALUES (3, 'c2', 'midna', 'Tahajjud now. Fajr at 5:25', 1762500000000);
+        INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');""")
+    c.commit()
+    c.close()
+    calls = []
+
+    def fake_ssh(cfg, script, timeout):
+        calls.append(script)
+        if "UNREACHABLE" in script or "VU5SRUFDSEFCTE" in script:
+            raise midna_body.MacError("Mac unreachable over ssh: timeout")
+        return 0, "host: test-mac\n", ""
+    monkeypatch.setattr(midna_body, "ssh", fake_ssh)
+    cfg = {**midna_body.DEFAULTS, "midna_db": str(db), "log": str(tmp_path / "body.jsonl")}
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), midna_body.make_handler(cfg, "tok"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", calls, tmp_path
+    srv.shutdown()
+
+
+def _rpc(url, method, params=None, token="tok", mid=1):
+    import urllib.error
+    import urllib.request
+    body = {"jsonrpc": "2.0", "method": method, **({"id": mid} if mid is not None else {}), "params": params or {}}
+    req = urllib.request.Request(url + "/mcp", json.dumps(body).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                          "Accept": "application/json, text/event-stream"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            raw = r.read()
+            return r.status, json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+def test_body_speaks_mcp_with_a_token(body):
+    url, _, _ = body
+    assert _rpc(url, "initialize", {"protocolVersion": "2025-06-18"}, token="wrong")[0] == 401
+    code, r = _rpc(url, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                        "clientInfo": {"name": "t", "version": "1"}})
+    assert code == 200 and r["result"]["protocolVersion"] == "2025-06-18"
+    assert r["result"]["serverInfo"]["name"] == "midna-body"
+    assert _rpc(url, "notifications/initialized", mid=None)[0] == 202
+    tools = {t["name"]: t for t in _rpc(url, "tools/list")[1]["result"]["tools"]}
+    ro = {n for n, t in tools.items() if t["annotations"]["readOnlyHint"]}
+    assert ro == {"device_status", "device_list", "device_read_file", "device_screenshot", "device_clipboard_read",
+                  "history_search", "history_read"}
+    assert {"device_shell", "device_write_file", "device_applescript", "device_clipboard_write"} <= set(tools) - ro
+    assert _rpc(url, "nope/nope")[1]["error"]["code"] == -32601
+
+
+def test_body_history_search_and_read(body):
+    url, _, _ = body
+    r = _rpc(url, "tools/call", {"name": "history_search", "arguments": {"query": "halal check"}})[1]["result"]
+    text = r["content"][0]["text"]
+    assert not r["isError"] and "2 match(es)" in text and "#1 " in text and "[halal] [check]" in text
+    text = _rpc(url, "tools/call", {"name": "history_search", "arguments": {"query": "halal", "role": "midna"}})[1]["result"]["content"][0]["text"]
+    assert "1 match(es)" in text and "#2 " in text
+    text = _rpc(url, "tools/call", {"name": "history_search", "arguments": {"query": "fajr", "since": "2025-11-01"}})[1]["result"]["content"][0]["text"]
+    assert "#3 " in text
+    assert "No archived" in _rpc(url, "tools/call", {"name": "history_search", "arguments": {"query": '"broken'}})[1]["result"]["content"][0]["text"]
+    text = _rpc(url, "tools/call", {"name": "history_read", "arguments": {"message_id": 2}})[1]["result"]["content"][0]["text"]
+    assert ">> #2" in text and "#1 " in text and "#3" not in text  # same conversation only
+
+
+def test_body_device_calls_are_quoted_and_logged(body):
+    url, calls, tmp = body
+    r = _rpc(url, "tools/call", {"name": "device_status", "arguments": {}})[1]["result"]
+    assert r["content"][0]["text"] == "host: test-mac"
+    _rpc(url, "tools/call", {"name": "device_list", "arguments": {"path": "~/My Docs; rm -rf /"}})
+    assert "ls -la \"$HOME\"/'My Docs; rm -rf /'" in calls[-1]
+    _rpc(url, "tools/call", {"name": "device_shell", "arguments": {"command": "echo 'hi' && date"}})
+    assert "echo 'hi'" not in calls[-1] and "base64 -D" in calls[-1]  # the command travels base64-encoded
+    r = _rpc(url, "tools/call", {"name": "device_shell", "arguments": {"command": "UNREACHABLE"}})[1]["result"]
+    assert r["isError"] and "unreachable" in r["content"][0]["text"]
+    log = [json.loads(ln) for ln in (tmp / "body.jsonl").read_text().splitlines()]
+    assert [x["tool"] for x in log] == ["device_status", "device_list", "device_shell", "device_shell"]
+    assert log[-1]["ok"] is False and log[0]["ok"] is True
+
+
+def test_body_unit_and_toggles(tmp_path):
+    cfg = midna_hermes.load_config(tmp_path / "c.json", {"state_dir": str(tmp_path / "st"), "unit_dir": str(tmp_path / "u"),
+                                                         "systemctl": False, "local_home": str(tmp_path / "l")})
+    assert "health" not in midna_hermes.body_install(cfg, "abc")
+    unit = (tmp_path / "u/midna-body.service").read_text()
+    assert "--mac huiyunlee@100.98.21.63" in unit and "Restart=always" in unit
+    assert (tmp_path / "st/midna-body.token").stat().st_mode & 0o777 == 0o600
+    tok = midna_hermes.body_token(cfg)
+    assert midna_hermes.body_token(cfg) == tok  # created once
+    assert "removed" in midna_hermes.body_install({**cfg, "body": False}, "")
+    assert not (tmp_path / "u/midna-body.service").exists()

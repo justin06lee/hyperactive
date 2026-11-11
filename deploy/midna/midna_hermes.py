@@ -72,8 +72,18 @@ DEFAULTS = {
     "systemctl": True,
     "gateway_restart": True,
     "rollback_plugin": CATALOG_PIN,
+    "persona": True,  # SOUL.md = deploy/midna/persona/SOUL.md (off: the pre-midna SOUL.md is put back)
+    "body": True,  # midna-body MCP (P2): midna's systemd user service + Hermes mcp_servers entry
+    "mac": "huiyunlee@100.98.21.63",  # the body's ssh target (Tailscale)
+    "body_port": 8791,
+    "api_server": True,  # Hermes api_server on 127.0.0.1 (P4's app path; also the health check)
+    "api_port": 8642,
+    "api_key_file": "~/.local/share/midna/secrets/hermes_api_server_key",
+    "backups_keep": 20,
 }
 TIMER = "midna-hermes-mirror"
+BODY = "midna-body"
+BODY_TOKEN_ENV = "MIDNA_BODY_TOKEN"
 SRC = "midna"
 
 
@@ -240,8 +250,13 @@ def cmd_install(cfg: dict, args) -> int:
     log(f"- midna's copy: {local}")
     log(f"- Hermes's copy: {'staged' if stage_hermes(cfg, sha) else 'already staged'} "
         f"({cfg['hermes_home']}/midna/code/{sha[:12]})")
+    log(f"- backup: {backup(cfg)}")
+    log("- " + body_install(cfg, sha))
     activated = st["phase"] == "activated"
     res = hermes_side(cfg, "p1", {
+        "persona": cfg["persona"], "body": cfg["body"], "api_server": cfg["api_server"],
+        "body_url": f"http://127.0.0.1:{cfg['body_port']}/mcp", "body_token": body_token(cfg) if cfg["body"] else "",
+        "api_port": cfg["api_port"], "api_key": api_key(cfg) if cfg["api_server"] else "",
         "sha": sha, "tz": cfg["tz"], "deliver": cfg["deliver"], "features": cfg["features"],
         "pinned_chars": cfg["pinned_chars"], "brief_at": cfg["brief_at"] if activated else "",
         "quiet_sources": "" if activated else SRC, "sweep_at": cfg["sweep_at"],
@@ -259,6 +274,97 @@ def cmd_install(cfg: dict, args) -> int:
         log("- gateway NOT restarted (--no-gateway-restart); it runs the old plugin code until it is")
     log("done.")
     return 0
+
+
+def backup(cfg: dict) -> str:
+    """Timestamped copy of Hermes's config.yaml, SOUL.md, .env and hyperactive.db, taken on every
+    install (and by `backup`), before anything changes. Separate from the one-time pre-midna copy."""
+    return hermes_side(cfg, "backup", {"keep": cfg["backups_keep"]}).get("dir", "?")
+
+
+def cmd_backup(cfg: dict, args) -> int:
+    log(f"backup: {backup(cfg)}")
+    return 0
+
+
+# --- the body (P2): midna-body MCP as midna's systemd user service ------------------------------
+
+def _secret(path: str) -> str:
+    """A random secret kept in a 600 file (created once)."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(__import__("secrets").token_urlsafe(32) + "\n")
+    return p.read_text().strip()
+
+
+def body_token(cfg: dict) -> str:
+    return _secret(str(Path(cfg["state_dir"]).expanduser() / f"{BODY}.token"))
+
+
+def api_key(cfg: dict) -> str:
+    return _secret(cfg["api_key_file"])
+
+
+def body_unit(cfg: dict) -> str:
+    code = Path(cfg["local_home"]).expanduser() / "code" / "current" / "deploy" / "midna" / "midna_body.py"
+    state = Path(cfg["state_dir"]).expanduser()
+    args = ["--port", str(cfg["body_port"]), "--mac", cfg["mac"], "--midna-db", str(Path(cfg["midna_db"]).expanduser()),
+            "--token-file", str(state / f"{BODY}.token"), "--log", str(state / f"{BODY}.jsonl"), "--tz", cfg["tz"]]
+    return ("[Unit]\nDescription=midna-body: MCP server for Hermes (his Mac over ssh, midna's chat archive)\n"
+            "After=network-online.target\n\n[Service]\nType=simple\n"
+            f"ExecStart=/usr/bin/python3 -I {code} serve {shlex.join(args)}\n"
+            "Restart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n")
+
+
+def body_install(cfg: dict, sha: str) -> str:
+    unit = Path(cfg["unit_dir"]).expanduser() / f"{BODY}.service"
+    if not cfg["body"]:
+        if not unit.exists():
+            return "midna-body: off"
+        if cfg["systemctl"]:
+            _run(["systemctl", "--user", "disable", "--now", f"{BODY}.service"], check=False)
+        unit.unlink()
+        if cfg["systemctl"]:
+            _run(["systemctl", "--user", "daemon-reload"], check=False)
+        return "midna-body: service stopped and removed"
+    body_token(cfg)
+    text = body_unit(cfg)
+    changed = not unit.exists() or unit.read_text() != text
+    if changed:
+        _mkdir(unit.parent)
+        unit.write_text(text)
+    if not cfg["systemctl"]:
+        return f"midna-body: unit {'written' if changed else 'unchanged'} (systemctl off)"
+    st = load_state(cfg)
+    if changed:
+        _run(["systemctl", "--user", "daemon-reload"])
+    _run(["systemctl", "--user", "enable", f"{BODY}.service"], check=False)
+    active = _run(["systemctl", "--user", "is-active", f"{BODY}.service"], check=False).stdout.strip() == "active"
+    if changed or not active or st.get("body_sha") != sha:
+        _run(["systemctl", "--user", "restart", f"{BODY}.service"])
+        save_state(cfg, body_sha=sha)
+        how = "restarted"
+    else:
+        how = "running"
+    ok = body_health(cfg)
+    return f"midna-body: {how} on 127.0.0.1:{cfg['body_port']} (mac {cfg['mac']}), health {'ok' if ok else 'NOT ok'}"
+
+
+def body_health(cfg: dict, wait: float = 10.0) -> bool:
+    import time
+    import urllib.request
+    end = time.monotonic() + wait
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{cfg['body_port']}/health", timeout=3) as r:
+                return r.status == 200
+        except OSError:
+            if time.monotonic() > end:
+                return False
+            time.sleep(0.5)
 
 
 def restart_gateway(cfg: dict) -> str:
@@ -416,6 +522,7 @@ def cmd_uninstall(cfg: dict, args) -> int:
     if load_state(cfg)["phase"] == "activated":
         log("- deactivating first")
         cmd_deactivate(cfg, args)
+    log("- " + body_install({**cfg, "body": False}, ""))
     res = hermes_side(cfg, "uninstall", {"rollback_plugin": cfg["rollback_plugin"]})
     for line in res.get("steps", []):
         log(f"- {line}")
@@ -435,6 +542,8 @@ def cmd_uninstall(cfg: dict, args) -> int:
 def cmd_status(cfg: dict, args) -> int:
     st = load_state(cfg)
     log(json.dumps({"config": cfg["_config"], "state": st}, indent=2))
+    if cfg["body"]:
+        log(f"midna-body: health {'ok' if body_health(cfg, 2) else 'NOT ok'} on 127.0.0.1:{cfg['body_port']}")
     log(json.dumps(hermes_side(cfg, "status", {}, check=False), indent=2))
     return 0
 
@@ -495,6 +604,39 @@ class HermesSide:
         self.hermes("config", "set", key, str(value))
         self.changed = True
         self.say(f"config {key} = {value!r}")
+
+    def config_set_masked(self, key: str, value: str) -> None:
+        """For keys `hermes config get` masks (headers.Authorization prints as `Bear...KEN}`)."""
+        cur = self.config_get(key)
+        if cur in (value, f"{value[:4]}...{value[-4:]}"):
+            return
+        self.hermes("config", "set", key, value)
+        self.changed = True
+        self.say(f"config {key} set")
+
+    def config_unset(self, key: str) -> None:
+        if self.config_get(key) in (None, ""):
+            return
+        self.hermes("config", "unset", key)
+        self.changed = True
+        self.say(f"config {key} removed")
+
+    # --- .env (Hermes reads it at start; secrets never go into config.yaml) ---
+    def env_set(self, key: str, value: str | None) -> None:
+        """KEY=value in <HERMES_HOME>/.env; None removes the line."""
+        f = self.home / ".env"
+        lines = f.read_text().splitlines() if f.exists() else []
+        kept = [ln for ln in lines if not re.match(rf"\s*(export\s+)?{re.escape(key)}=", ln)]
+        new = kept + ([f"{key}={value}"] if value is not None else [])
+        if new == lines:
+            return
+        tmp = f.with_name(".env.midna-new")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(new) + "\n")
+        os.replace(tmp, f)
+        self.changed = True
+        self.say(f".env {key} {'set' if value is not None else 'removed'}")
 
     def config_get(self, key: str):
         """The configured value as `hermes config get` prints it; None when it isn't set."""
@@ -580,6 +722,60 @@ class HermesSide:
         self.changed = True
         self.say(f"plugin hyperactive installed from {identifier} @ {ref[:12]}")
 
+    # --- persona, body (P2), api_server ---
+    def install_soul(self, on: bool) -> None:
+        f = self.home / "SOUL.md"
+        src = (self.code / "deploy" / "midna" / "persona" / "SOUL.md") if on else (self.home / "backups" / "pre-midna" / "SOUL.md")
+        if not src.exists():
+            return
+        text = src.read_text()
+        if f.exists() and f.read_text() == text:
+            return
+        f.write_text(text)
+        f.chmod(0o600)
+        self.changed = True
+        self.say("SOUL.md = " + ("midna persona" if on else "the pre-midna SOUL.md"))
+
+    def body_config(self, on: bool, url: str, token: str) -> None:
+        k = f"mcp_servers.{BODY}."
+        if not on:
+            self.config_unset(f"mcp_servers.{BODY}")
+            self.env_set(BODY_TOKEN_ENV, None)
+            return
+        self.env_set(BODY_TOKEN_ENV, token)
+        self.config_set(k + "url", url)
+        self.config_set_masked(k + "headers.Authorization", "Bearer ${%s}" % BODY_TOKEN_ENV)
+        self.config_set(k + "trust", "untrusted")  # write-capable device tools ask through the approval buttons
+        self.config_set(k + "timeout", 600)
+        self.config_set(k + "connect_timeout", 30)
+        self.config_set(k + "enabled", "true")
+
+    def api_config(self, on: bool, port: int, key: str) -> None:
+        self.env_set("API_SERVER_ENABLED", "true" if on else None)
+        self.env_set("API_SERVER_HOST", "127.0.0.1" if on else None)
+        self.env_set("API_SERVER_PORT", str(port) if on else None)
+        self.env_set("API_SERVER_KEY", key if on else None)
+
+    def op_backup(self) -> dict:
+        root = self.home / "backups" / "midna"
+        dest = root / stamp()
+        while dest.exists():
+            dest = dest.with_name(dest.name + "x")
+        dest.mkdir(parents=True, mode=0o700)
+        for name in ("config.yaml", "SOUL.md", ".env"):
+            if (self.home / name).exists():
+                shutil.copy2(self.home / name, dest / name.lstrip("."))
+        if self.db.exists():
+            s, d = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True), sqlite3.connect(dest / "hyperactive.db")
+            s.backup(d)
+            d.close()
+            s.close()
+        for f in dest.iterdir():
+            f.chmod(0o600)
+        for old in sorted(p for p in root.iterdir() if p.is_dir())[:-int(self.o.get("keep") or 20)]:
+            shutil.rmtree(old)
+        return {"dir": str(dest)}
+
     # --- the import ---
     def backup_db(self) -> Path | None:
         """hyperactive.db.pre-midna.<stamp> next to it (what the importer's live guard wants);
@@ -656,6 +852,9 @@ class HermesSide:
         self.config_set(p + "deliver", o["deliver"])
         self.ha_setup()
         self.install_skill()
+        self.install_soul(bool(o.get("persona", True)))
+        self.body_config(bool(o.get("body")), o.get("body_url", ""), o.get("body_token", ""))
+        self.api_config(bool(o.get("api_server")), int(o.get("api_port") or 8642), o.get("api_key", ""))
         self.write_shims()
         hh, mm = o["sweep_at"].split(":")
         self.ensure_job("midna-jobwatch", o["jobwatch_every"], JOBWATCH_PROMPT, script="midna_jobwatch.py",
@@ -798,6 +997,8 @@ class HermesSide:
             with _quiet_stdout():
                 import_midna.main(["undo", "--target", str(self.db), "--apply", "--live"])
             self.say("imported midna rows deleted (undo); a backup of the DB before that is next to it")
+        self.body_config(False, "", "")
+        self.api_config(False, 0, "")
         bak = self.home / "backups" / "pre-midna"
         for name in ("config.yaml", "SOUL.md"):
             if (bak / name).exists():
@@ -811,7 +1012,14 @@ class HermesSide:
 
     def op_status(self) -> dict:
         names = sorted(str(j.get("name")) for j in self.jobs() if str(j.get("name", "")).startswith("midna"))
-        return {"state": self.state(), "jobs": names, "ledger": str(self.mdir / "oneshot-ledger.json")}
+        soul = self.home / "SOUL.md"
+        persona = self.code / "deploy" / "midna" / "persona" / "SOUL.md"
+        env = (self.home / ".env").read_text() if (self.home / ".env").exists() else ""
+        return {"state": self.state(), "jobs": names, "ledger": str(self.mdir / "oneshot-ledger.json"),
+                "timezone": self.config_get("timezone"), "memory_provider": self.config_get("memory.provider"),
+                "soul": "midna persona" if soul.exists() and persona.exists() and soul.read_text() == persona.read_text()
+                else "other", "mcp_midna_body": self.config_get(f"mcp_servers.{BODY}.url"),
+                "api_server": "on" if re.search(r"(?m)^API_SERVER_ENABLED=true", env) else "off"}
 
 
 class _quiet_stdout:
@@ -840,7 +1048,7 @@ def main(argv=None) -> int:
     if argv[:1] == ["hermes-side"]:
         return hermes_side_main(argv[1])
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", choices=("install", "mirror", "activate", "deactivate", "uninstall", "status"))
+    ap.add_argument("command", choices=("install", "mirror", "activate", "deactivate", "uninstall", "status", "backup"))
     ap.add_argument("--config", default=str(DEFAULT_CONFIG))
     ap.add_argument("--no-gateway-restart", action="store_true")
     for key, default in DEFAULTS.items():  # install saves these; the other commands may override them once
@@ -856,7 +1064,7 @@ def main(argv=None) -> int:
         mirror(cfg)
         return 0
     return {"install": cmd_install, "activate": cmd_activate, "deactivate": cmd_deactivate,
-            "uninstall": cmd_uninstall, "status": cmd_status}[args.command](cfg, args)
+            "uninstall": cmd_uninstall, "status": cmd_status, "backup": cmd_backup}[args.command](cfg, args)
 
 
 if __name__ == "__main__":
