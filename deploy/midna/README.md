@@ -135,6 +135,21 @@ Also, on every run (each one a toggle, default on):
 
 Local check without Hermes: `python3 -I deploy/midna/midna_body.py call history_search '{"query":"fajr"}'`.
 
+## P4: the midna app (`--app`, default on)
+Chats from the app reach Hermes through the api_server (midna's `hermes` brain). The other direction,
+what Hermes sends on its own (the pulse, the brief, `midna:*` and helper cron jobs), goes through
+`app_platform/`: a send-only Hermes platform plugin, `midna-app`, registering the platform `midna`. Its
+`send` POSTs to `midna serve`'s `/v1/deliver` (a device token of kind `bridge`), which puts the text in the
+app's conversation and outbox as a notification, push included, without midna's quiet hours (the pulse
+keeps its own). Hermes's cron wrapper ("Cronjob Response: …") is stripped.
+
+- `install` with `secrets/hermes_app_token` present: installs the plugin from the staged bare repo, sets
+  `MIDNA_APP_URL`/`MIDNA_APP_TOKEN`/`MIDNA_APP_HOME_CHANNEL` in Hermes's `.env`, and delivers to
+  `<deliver>,midna`: hyperactive's `deliver`, the helper jobs, and every `midna:*` job (`hermes cron edit`).
+  Without the token it delivers to `<deliver>` only and says what it waits for.
+- Off: `install --app false` takes the plugin and env out and puts the jobs back on `<deliver>`.
+- Agent-made cron jobs that deliver to `origin` (a Telegram chat) still go to Telegram only.
+
 ## What the midna repo's `midna install` must call
 The end state ships from the midna repo (Justin, Nov 10). This directory is written to be vendored
 there unchanged (e.g. as `vendor/hyperactive` at a pinned sha); `midna install` then needs only:
@@ -146,8 +161,11 @@ there unchanged (e.g. as `vendor/hyperactive` at a pinned sha); `midna install` 
    This is everything P1 + persona + P2 + api_server, idempotent, and safe to re-run on every `midna install`/update.
 3. At the writer flip (P3), once: `midna_hermes.py activate`. `midna install` must not run it on its own;
    it should read `~/.local/state/midna-hermes/state.json` and keep whatever phase is recorded (install already does this).
-4. P4 (not built yet): `midna model hermes` points `midna serve` at `http://127.0.0.1:<api_port>/v1/responses`
-   with the key from `hermes_api_server_key`.
+4. P4: `midna hermes setup` (midna repo, `clients/cli/src/hermes.ts`; `midna host install` runs it) clones
+   this repo at its pinned sha into `~/.local/share/midna/vendor/hyperactive`, pairs Hermes with
+   `midna serve` as a bridge (token in `secrets/hermes_app_token`), runs step 2 with `--repo`/`--ref`/`--app-url`,
+   and once the phase is `activated` sets `midna model hermes`: app chats become Hermes runs
+   (`/v1/runs` + SSE, key from `hermes_api_server_key`).
 5. `midna restore`: restoring `midna.db` then re-running `install` re-mirrors it while phase is `mirror`. After
    activation, Hermes's own data is the source of truth: restore `~hermes/.hermes/backups/midna/<stamp>/`
    (config, SOUL, env, hyperactive.db) and restart the gateway.

@@ -79,9 +79,14 @@ DEFAULTS = {
     "api_server": True,  # Hermes api_server on 127.0.0.1 (P4's app path; also the health check)
     "api_port": 8642,
     "api_key_file": "~/.local/share/midna/secrets/hermes_api_server_key",
+    "app": True,  # P4: Hermes's own messages also go into the midna app (the `midna` platform plugin)
+    "app_url": "http://127.0.0.1:7717",  # midna serve
+    "app_token_file": "~/.local/share/midna/secrets/hermes_app_token",  # written by `midna hermes setup`
     "backups_keep": 20,
 }
 TIMER = "midna-hermes-mirror"
+APP = "midna"  # the platform name in deliver targets ("telegram,midna")
+APP_PLUGIN = "midna-app"
 BODY = "midna-body"
 BODY_TOKEN_ENV = "MIDNA_BODY_TOKEN"
 SRC = "midna"
@@ -252,12 +257,15 @@ def cmd_install(cfg: dict, args) -> int:
         f"({cfg['hermes_home']}/midna/code/{sha[:12]})")
     log(f"- backup: {backup(cfg)}")
     log("- " + body_install(cfg, sha))
+    if cfg["app"] and not app_token(cfg):
+        log(f"- midna app delivery: waiting for {cfg['app_token_file']} (`midna hermes setup` pairs Hermes)")
     activated = st["phase"] == "activated"
     res = hermes_side(cfg, "p1", {
         "persona": cfg["persona"], "body": cfg["body"], "api_server": cfg["api_server"],
         "body_url": f"http://127.0.0.1:{cfg['body_port']}/mcp", "body_token": body_token(cfg) if cfg["body"] else "",
         "api_port": cfg["api_port"], "api_key": api_key(cfg) if cfg["api_server"] else "",
-        "sha": sha, "tz": cfg["tz"], "deliver": cfg["deliver"], "features": cfg["features"],
+        "app_url": cfg["app_url"], "app_token": app_token(cfg),
+        "sha": sha, "tz": cfg["tz"], "deliver": deliver_to(cfg), "features": cfg["features"],
         "pinned_chars": cfg["pinned_chars"], "brief_at": cfg["brief_at"] if activated else "",
         "quiet_sources": "" if activated else SRC, "sweep_at": cfg["sweep_at"],
         "jobwatch_every": cfg["jobwatch_every"], "ledger_every": cfg["ledger_every"]})
@@ -366,6 +374,18 @@ def body_token(cfg: dict) -> str:
 
 def api_key(cfg: dict) -> str:
     return _secret(cfg["api_key_file"])
+
+
+def app_token(cfg: dict) -> str:
+    """midna's device token for Hermes (a bridge), or "" while `midna hermes setup` hasn't paired it."""
+    p = Path(cfg["app_token_file"]).expanduser()
+    return p.read_text().strip() if cfg["app"] and p.exists() else ""
+
+
+def deliver_to(cfg: dict) -> str:
+    """Where Hermes's own messages go: the configured target, plus the midna app once it is paired."""
+    targets = [t for t in cfg["deliver"].split(",") if t and t != APP]
+    return ",".join(targets + ([APP] if app_token(cfg) else []))
 
 
 def body_unit(cfg: dict) -> str:
@@ -555,7 +575,7 @@ def cmd_activate(cfg: dict, args) -> int:
         raise SystemExit(f"activate: run install first (phase is {st['phase']})")
     log("activate (P3 writer flip)" + (" again: re-checking every step" if st["phase"] == "activated" else ""))
     mirror(cfg)
-    res = hermes_side(cfg, "activate", {"brief_at": cfg["brief_at"], "deliver": cfg["deliver"]})
+    res = hermes_side(cfg, "activate", {"brief_at": cfg["brief_at"], "deliver": deliver_to(cfg)})
     for line in res.get("steps", []):
         log(f"- {line}")
     n = pause_midna(cfg)
@@ -774,15 +794,15 @@ class HermesSide:
             h.update(f.read_bytes())
         return h.hexdigest()
 
-    def install_plugin(self, identifier: str, ref: str, wanted: Path | None) -> None:
-        installed = self.home / "plugins" / "hyperactive"
+    def install_plugin(self, identifier: str, ref: str, wanted: Path | None, name: str = "hyperactive") -> None:
+        installed = self.home / "plugins" / name
         if wanted is not None and installed.is_dir() and self._tree_hash(installed.resolve()) == self._tree_hash(wanted):
             return
         if installed.is_symlink():  # a dev checkout linked in by hand; the installer owns this from now on
             installed.unlink()
         self.hermes("plugins", "install", identifier, "--ref", ref, "--force", "--enable", "--yes-deps")
         self.changed = True
-        self.say(f"plugin hyperactive installed from {identifier} @ {ref[:12]}")
+        self.say(f"plugin {name} installed from {identifier} @ {ref[:12]}")
 
     # --- persona, body (P2), api_server ---
     def install_soul(self, on: bool) -> None:
@@ -817,6 +837,40 @@ class HermesSide:
         self.env_set("API_SERVER_HOST", "127.0.0.1" if on else None)
         self.env_set("API_SERVER_PORT", str(port) if on else None)
         self.env_set("API_SERVER_KEY", key if on else None)
+
+    def app_config(self, url: str, token: str, sha: str | None) -> None:
+        """P4: the `midna` platform (deploy/midna/app_platform), send-only into midna serve's outbox.
+        With no token (not paired, or turned off) the plugin and its env are taken out again."""
+        installed = self.home / "plugins" / APP_PLUGIN
+        if token and sha:
+            self.install_plugin(f"file://{self.mdir}/hyperactive.git#deploy/midna/app_platform", sha,
+                                self.mdir / "code" / sha / "deploy" / "midna" / "app_platform", name=APP_PLUGIN)
+            self.env_set("MIDNA_APP_URL", url)
+            self.env_set("MIDNA_APP_TOKEN", token)
+            self.env_set("MIDNA_APP_HOME_CHANNEL", "main")
+            return
+        for key in ("MIDNA_APP_URL", "MIDNA_APP_TOKEN", "MIDNA_APP_HOME_CHANNEL"):
+            self.env_set(key, None)
+        if installed.exists():
+            self.hermes("plugins", "remove", APP_PLUGIN, check=False)
+            shutil.rmtree(installed, ignore_errors=True)
+            self.changed = True
+            self.say(f"plugin {APP_PLUGIN} removed")
+
+    def retarget(self, deliver: str) -> None:
+        """midna's cron jobs that deliver to the user follow `deliver` (Telegram, plus the midna app once it
+        is paired). Jobs delivering elsewhere (`local`, a chat id) are left alone; hyperactive's own
+        pulse and brief follow its `deliver` setting through `hermes hyperactive setup`."""
+        base = ",".join(t for t in deliver.split(",") if t != APP)
+        same = {base, f"{base},{APP}"}
+        for j in self.jobs():
+            name, cur = str(j.get("name", "")), str(j.get("deliver") or "")
+            if not name.startswith(f"{SRC}:"):  # the helper jobs follow it through ensure_job
+                continue
+            if cur in same and cur != deliver:
+                self.hermes("cron", "edit", j["id"], "--deliver", deliver)
+                self.changed = True
+                self.say(f"cron job {name}: deliver {cur} -> {deliver}")
 
     def op_backup(self) -> dict:
         root = self.home / "backups" / "midna"
@@ -917,6 +971,8 @@ class HermesSide:
         self.install_soul(bool(o.get("persona", True)))
         self.body_config(bool(o.get("body")), o.get("body_url", ""), o.get("body_token", ""))
         self.api_config(bool(o.get("api_server")), int(o.get("api_port") or 8642), o.get("api_key", ""))
+        self.app_config(o.get("app_url", ""), o.get("app_token", ""), sha)
+        self.retarget(o["deliver"])
         self.write_shims()
         hh, mm = o["sweep_at"].split(":")
         self.ensure_job("midna-jobwatch", o["jobwatch_every"], JOBWATCH_PROMPT, script="midna_jobwatch.py",
@@ -1061,6 +1117,7 @@ class HermesSide:
             self.say("imported midna rows deleted (undo); a backup of the DB before that is next to it")
         self.body_config(False, "", "")
         self.api_config(False, 0, "")
+        self.app_config("", "", None)
         bak = self.home / "backups" / "pre-midna"
         for name in ("config.yaml", "SOUL.md"):
             if (bak / name).exists():
@@ -1081,7 +1138,8 @@ class HermesSide:
                 "timezone": self.config_get("timezone"), "memory_provider": self.config_get("memory.provider"),
                 "soul": "midna persona" if soul.exists() and persona.exists() and soul.read_text() == persona.read_text()
                 else "other", "mcp_midna_body": self.config_get(f"mcp_servers.{BODY}.url"),
-                "api_server": "on" if re.search(r"(?m)^API_SERVER_ENABLED=true", env) else "off"}
+                "api_server": "on" if re.search(r"(?m)^API_SERVER_ENABLED=true", env) else "off",
+                "midna_app": "on" if re.search(r"(?m)^MIDNA_APP_TOKEN=.", env) else "off"}
 
 
 class _quiet_stdout:

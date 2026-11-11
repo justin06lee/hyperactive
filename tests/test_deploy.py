@@ -476,3 +476,26 @@ def test_body_unit_and_toggles(tmp_path):
     assert midna_hermes.body_token(cfg) == tok  # created once
     assert "removed" in midna_hermes.body_install({**cfg, "body": False}, "")
     assert not (tmp_path / "u/midna-body.service").exists()
+
+
+# --- P4: deliveries into the midna app ----------------------------------------------------------
+
+def test_deliver_to_adds_the_app_once_paired(tmp_path):
+    token = tmp_path / "hermes_app_token"
+    cfg = {**midna_hermes.DEFAULTS, "app_token_file": str(token)}
+    assert midna_hermes.deliver_to(cfg) == "telegram"  # not paired yet: Telegram only
+    token.write_text("tok\n")
+    assert midna_hermes.deliver_to(cfg) == "telegram,midna"
+    assert midna_hermes.deliver_to({**cfg, "deliver": "telegram,midna"}) == "telegram,midna"  # never twice
+    assert midna_hermes.deliver_to({**cfg, "app": False}) == "telegram"
+
+
+def test_app_platform_strips_the_cron_wrapper():
+    src = (ROOT / "deploy" / "midna" / "app_platform" / "adapter.py").read_text()
+    ns: dict = {}
+    exec("import re\n" + "\n".join(ln for ln in src.splitlines() if ln.startswith("_WRAP")), ns)
+    exec("def unwrap" + src.split("def unwrap", 1)[1].split("\n\n\n", 1)[0], ns)
+    wrapped = ("Cronjob Response: midna:2\n(job_id: bb97f3714031)\n-------------\n\nFajr in 20 min.\n\n"
+               "To stop or manage this job, send me a new message (e.g. \"stop reminder midna:2\").")
+    assert ns["unwrap"](wrapped) == "Fajr in 20 min."
+    assert ns["unwrap"]("Ruri: PR #12 merged.") == "Ruri: PR #12 merged."

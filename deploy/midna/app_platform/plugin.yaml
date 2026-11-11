@@ -1,0 +1,25 @@
+name: midna-app
+label: midna app
+kind: platform
+version: 0.1.0
+description: >
+  Send-only delivery into the midna app: what Hermes sends on its own (cron output, the
+  hyperactive pulse and brief) also goes to `midna serve`'s outbox, so it reaches the midna
+  app and its push notifications, not only Telegram. Use it as a deliver target next to
+  Telegram (`deliver: telegram,midna`). Chats from the app come in through the api_server,
+  not through this adapter. Installed and configured by deploy/midna/midna_hermes.py.
+author: justin06lee
+requires_env:
+  - name: MIDNA_APP_URL
+    description: "midna serve on this machine (e.g. http://127.0.0.1:7717)"
+    prompt: "midna serve URL"
+    password: false
+  - name: MIDNA_APP_TOKEN
+    description: "midna device token Hermes delivers with (paired as a bridge by `midna hermes setup`)"
+    prompt: "midna token"
+    password: true
+optional_env:
+  - name: MIDNA_APP_HOME_CHANNEL
+    description: "Conversation for cron delivery (default: main)"
+    prompt: "midna conversation"
+    password: false
