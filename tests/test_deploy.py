@@ -357,7 +357,7 @@ def test_installer_end_to_end(tmp_path, midna):
     run("activate")  # again: no duplicate jobs, no re-import
     assert sorted(j["name"] for j in oneshot_sweep.cron_jobs(home)).count("midna:2") == 1
     run("mirror")
-    assert len(list((home / "midna/mirror").glob("2*"))) == 4  # install x2, mirror, activate; none after
+    assert len(list((home / "midna/mirror").glob("2*"))) == 6  # install x4, mirror, activate; none after
 
     run("deactivate")
     assert not [n for n in jobs() if n.startswith("midna:")] and get(s + "quiet_sources") == "midna"
